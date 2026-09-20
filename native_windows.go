@@ -51,7 +51,7 @@ func (d *nativeDriver) button(down bool) error {
 func (d *nativeDriver) arm(milliseconds int) error {
 	d.disarm()
 	d.timerID++ // Ignore a stale queued WM_TIMER after stop/restart.
-	if d.timerID == 0 || d.timerID == healthTimerID {
+	if d.timerID == 0 || d.timerID >= pipTimerID {
 		d.timerID = 1
 	}
 	ok, _, err := procSetTimer.Call(d.owner, d.timerID, uintptr(milliseconds), 0)
@@ -103,6 +103,9 @@ func (a *application) refreshTargets() {
 	}
 	if !found {
 		a.selected = targetWindow{}
+		if a.pip.enabled {
+			a.stopPIP()
+		}
 	}
 }
 

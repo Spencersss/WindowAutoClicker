@@ -17,7 +17,7 @@ Open **`dist/spencer-clicker.exe`** on Windows 10/11 x64.
 
 The status icon is docked in the **Windows system tray beside the clock**: green
 while clicking/holding, gray while idle. Hover for the current state and hotkey.
-There is no floating overlay. Windows may initially put it in the tray's hidden
+There is no permanent floating status overlay. Windows may initially put it in the tray's hidden
 icons menu; use the taskbar's overflow arrow to find it and drag it beside the
 clock if desired. Windows controls visibility and placement.
 
@@ -36,6 +36,43 @@ configured interval. Thus 50 ms means roughly a 60 ms cycle, not 20 clicks per
 second. Timing is approximate and depends on Windows scheduling. Hold mode sends
 one down and one up. Stop, normal exit, suspend, and session shutdown release a
 held button; force-killing a process cannot run its cleanup.
+
+## Picture-in-picture
+
+Select a target, then turn **Picture-in-picture** on in the settings window.
+The small always-on-top preview has no title bar, maximize/minimize controls, or
+close button. Hold **Shift** while dragging anywhere on the image to move the
+whole view. Toggle PiP off from the settings window. It stays visible when the
+settings window is minimized to the tray. PiP is off by default, and operates
+independently of whether clicking is running.
+
+Choose a maximum preview size of **160 x 90**, **320 x 180**, **480 x 270**, or
+**640 x 360**, and a refresh limit of **1, 2, 5, 10, 15, or 30 FPS**. The default
+is **320 x 180 at 5 FPS**. Content keeps its aspect ratio with black padding;
+changing the target, size, or refresh limit safely restarts the capture session.
+These settings are session-only, like the clicker settings.
+
+PiP requires **Windows 11 24H2 or newer** and a compatible graphics driver.
+It uses Windows Graphics Capture's
+[`MinUpdateInterval`](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.capture.graphicscapturesession.minupdateinterval)
+to limit the capture
+producer, not merely discard full-speed frames. Older Windows versions can still
+run the clicker; PiP reports an error instead of silently running unthrottled.
+Windows may show its standard capture border around the target.
+
+Capture runs on a separate thread so graphics work does not block click timing or
+global hotkeys. Only the latest small preview bitmap is retained for display.
+Lower FPS reduces capture frequency, and smaller previews reduce CPU sampling
+and bitmap size. Windows still allocates source-sized GPU capture/staging buffers:
+a tiny preview does **not** make a large source window free to capture. Turning
+PiP off closes its capture session and releases those resources; no capture worker
+runs while PiP is off after shutdown completes.
+
+Minimized targets may stop producing frames (the preview labels this state).
+Protected content, some exclusive-fullscreen games, or capture-restricted windows
+may appear blank or reject capture. Restore the target or use windowed/borderless
+mode where supported. PiP is a view only; dragging or clicking the preview does
+not send mouse input to the target. Target closure or sleep switches PiP off.
 
 ## Compatibility with the original
 
@@ -130,6 +167,8 @@ mouse-up, held state, and coordinates. Close the receiver to finish that test.
 - `native_windows.go`: target discovery, timers, and global input hooks.
 - `ui_windows.go`: painting, fonts, and icon artwork.
 - `tray_windows.go`: native notification-area icon, status, and tray menu.
+- `pip_windows.go`: optional draggable preview, settings, and UI lifecycle.
+- `capture_windows.go`: rate-limited Windows Graphics Capture worker and scaling.
 - `win32_windows.go`: Win32 declarations; standard library only.
 
 Native API references: [mouse-message coordinates](https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-lbuttondown),

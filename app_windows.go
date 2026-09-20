@@ -13,6 +13,9 @@ const (
 	idHold
 	idHotkey
 	idToggle
+	idPIP
+	idPIPSize
+	idPIPFPS
 )
 
 const healthTimerID = 0x7FFFFFFF
@@ -20,6 +23,8 @@ const healthTimerID = 0x7FFFFFFF
 var activeApp *application
 
 type application struct {
+	scroll                                                             int32
+	layingOut                                                          bool
 	instance, hwnd, icon                                               uintptr
 	tray                                                               trayIcon
 	taskbarCreated                                                     uint32
@@ -39,6 +44,8 @@ type application struct {
 	selected                                                           targetWindow
 	driver                                                             nativeDriver
 	clicker                                                            clicker
+	pip                                                                pictureInPicture
+	pipButton, pipSizeCombo, pipFPSCombo                               uintptr
 }
 
 func newApplication() *application {
@@ -49,6 +56,7 @@ func newApplication() *application {
 		}
 	}
 	a.clicker.driver = &a.driver
+	a.pip.options = captureOptions{width: 320, height: 180, fps: 5}
 	return a
 }
 
@@ -68,12 +76,13 @@ func (a *application) run() error {
 		return err
 	}
 
-	style := uint32(wsCaption | wsSysMenu | wsMinimizeBox | wsThickFrame | wsMaximizeBox | wsClipChildren)
-	bounds := rect{right: a.s(520), bottom: a.s(580)}
+	style := uint32(wsCaption | wsSysMenu | wsMinimizeBox | wsThickFrame | wsMaximizeBox | wsClipChildren | wsVScroll)
+	bounds := rect{right: a.s(520), bottom: a.s(740)}
 	procAdjustWindowRectEx.Call(uintptr(unsafe.Pointer(&bounds)), uintptr(style), 0, 0)
 	width, height := bounds.right-bounds.left, bounds.bottom-bounds.top
 	var work rect
 	procSystemParametersInfo.Call(spiGetWorkArea, 0, uintptr(unsafe.Pointer(&work)), 0)
+	height = min(height, work.bottom-work.top)
 	a.hwnd = createWindow(0, mainClassName, appName, style,
 		work.left+(work.right-work.left-width)/2, work.top+(work.bottom-work.top-height)/2,
 		width, height, 0, 0, a.instance)
@@ -113,10 +122,15 @@ func (a *application) run() error {
 			procTranslateMessage.Call(uintptr(unsafe.Pointer(&message)))
 			procDispatchMessage.Call(uintptr(unsafe.Pointer(&message)))
 		}
+		if keyboard {
+			a.revealFocusedControl()
+		}
 	}
 }
 
 func (a *application) cleanup() {
+	a.stopPIP()
+	a.waitPIPShutdown()
 	a.uninstallHooks()
 	_ = a.clicker.stop()
 	a.tray.remove()
@@ -165,6 +179,17 @@ func (a *application) createControls(hwnd uintptr) {
 	a.holdButton = create("BUTTON", "Hold left click: Off", bsOwnerDraw, idHold)
 	a.hotkeyButton = create("BUTTON", "Hotkey: F9", bsOwnerDraw, idHotkey)
 	a.toggleButton = create("BUTTON", "Start clicker [F9]", bsOwnerDraw, idToggle)
+	a.pipButton = create("BUTTON", "Picture-in-picture: Off", bsOwnerDraw, idPIP)
+	a.pipSizeCombo = create("COMBOBOX", "Preview resolution", cbsDropdownList|cbsOwnerDrawFixed|cbsHasStrings, idPIPSize)
+	a.pipFPSCombo = create("COMBOBOX", "Preview refresh rate", cbsDropdownList|cbsOwnerDrawFixed|cbsHasStrings, idPIPFPS)
+	for _, size := range pipSizes {
+		sendMessage(a.pipSizeCombo, cbAddString, 0, uintptr(unsafe.Pointer(utf16Ptr(size.label))))
+	}
+	for _, fps := range pipFrameRates {
+		sendMessage(a.pipFPSCombo, cbAddString, 0, uintptr(unsafe.Pointer(utf16Ptr(fmt.Sprintf("%d FPS", fps)))))
+	}
+	sendMessage(a.pipSizeCombo, cbSetCurSel, 1, 0)
+	sendMessage(a.pipFPSCombo, cbSetCurSel, 2, 0)
 	a.applyFonts()
 	a.layout()
 	dark := int32(1)
@@ -174,19 +199,29 @@ func (a *application) createControls(hwnd uintptr) {
 }
 
 func (a *application) layout() {
-	if a.toggleButton == 0 {
+	if a.toggleButton == 0 || a.layingOut {
 		return
 	}
+	a.layingOut = true
+	defer func() { a.layingOut = false }()
 	var bounds rect
 	getClientRect(a.hwnd, &bounds)
-	w, h := bounds.right*96/a.dpi, bounds.bottom*96/a.dpi
+	page := bounds.bottom * 96 / a.dpi
+	a.scroll = clampScroll(a.scroll, page)
+	info := scrollInfo{size: uint32(unsafe.Sizeof(scrollInfo{})), mask: 1 | 2 | 4, max: mainContentHeight - 1, page: uint32(max(1, page)), pos: a.scroll}
+	procSetScrollInfo.Call(a.hwnd, 1, uintptr(unsafe.Pointer(&info)), 1)
+	getClientRect(a.hwnd, &bounds)
+	w, h := bounds.right*96/a.dpi, max(mainContentHeight, page)
 	move := func(hwnd uintptr, x, y, width, height int32) {
-		procMoveWindow.Call(hwnd, uintptr(a.s(x)), uintptr(a.s(y)), uintptr(a.s(width)), uintptr(a.s(height)), 1)
+		procMoveWindow.Call(hwnd, uintptr(a.s(x)), uintptr(a.s(y-a.scroll)), uintptr(a.s(width)), uintptr(a.s(height)), 1)
 	}
 	move(a.processCombo, 28, 134, w-56, 300)
 	move(a.intervalEdit, w-174, 243, 112, 26)
 	move(a.holdButton, w-158, 305, 130, 42)
 	move(a.hotkeyButton, w-218, 381, 190, 42)
+	move(a.pipButton, w-158, 461, 130, 42)
+	move(a.pipSizeCombo, 28, 551, 230, 220)
+	move(a.pipFPSCombo, w-198, 551, 170, 240)
 	move(a.toggleButton, 28, h-100, w-56, 48)
 	procInvalidateRect.Call(a.hwnd, 0, 1)
 }
@@ -313,6 +348,7 @@ func (a *application) handleCommand(id, notification uint16) {
 			if index >= 0 && int(index) < len(a.targets) {
 				a.selected = a.targets[index]
 				a.setStatus("Ready. "+a.hotkey.name()+" to start clicking.", false)
+				a.restartPIP()
 			}
 		}
 	case idHold:
@@ -333,6 +369,18 @@ func (a *application) handleCommand(id, notification uint16) {
 	case idToggle:
 		if notification == bnClicked {
 			a.toggle()
+		}
+	case idPIP:
+		if notification == bnClicked {
+			if a.pip.enabled {
+				a.stopPIP()
+			} else {
+				a.enablePIP()
+			}
+		}
+	case idPIPSize, idPIPFPS:
+		if notification == cbnSelChange {
+			a.changePIPOptions()
 		}
 	}
 }
@@ -367,7 +415,13 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 		return 0
 	case wmGetMinMaxInfo:
 		info := (*minMaxInfo)(unsafe.Pointer(lparam))
-		info.minTrackSize = point{a.s(536), a.s(619)}
+		info.minTrackSize = point{a.s(536), a.s(360)}
+		return 0
+	case 0x0115: // WM_VSCROLL
+		a.handleScroll(loword(wparam))
+		return 0
+	case 0x020A: // WM_MOUSEWHEEL
+		a.scrollBy(-int32(int16(hiword(wparam))) * 48 / 120)
 		return 0
 	case wmCommand:
 		a.handleCommand(loword(wparam), hiword(wparam))
@@ -383,6 +437,10 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 		}
 		return 0
 	case wmTimer:
+		if wparam == pipTimerID {
+			a.tickPIP()
+			return 0
+		}
 		if wparam == healthTimerID {
 			if (a.clicker.running || a.clicker.pressed) && !a.driver.valid() {
 				_ = a.clicker.stop()
@@ -423,6 +481,7 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 		a.layout()
 		return 0
 	case wmQueryEndSession:
+		a.stopPIP()
 		_ = a.clicker.stop()
 		a.updateControls()
 		return 1
@@ -433,6 +492,7 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 		return 0
 	case wmPowerBroadcast:
 		if wparam == 4 {
+			a.stopPIP()
 			_ = a.clicker.stop()
 			a.setStatus("Stopped for sleep. Start again when ready.", false)
 			a.updateControls()
@@ -448,6 +508,7 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 		procDestroyWindow.Call(hwnd)
 		return 0
 	case wmDestroy:
+		a.stopPIP()
 		_ = a.clicker.stop()
 		a.tray.remove()
 		procPostQuitMessage.Call(0)

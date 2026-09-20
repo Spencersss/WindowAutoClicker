@@ -30,13 +30,19 @@ func (a *application) makeFonts() {
 }
 
 func (a *application) applyFonts() {
-	for _, hwnd := range []uintptr{a.processCombo, a.intervalEdit, a.holdButton, a.hotkeyButton, a.toggleButton} {
+	for _, hwnd := range []uintptr{a.processCombo, a.intervalEdit, a.holdButton, a.hotkeyButton, a.toggleButton, a.pipButton, a.pipSizeCombo, a.pipFPSCombo} {
 		if hwnd != 0 {
 			sendMessage(hwnd, wmSetFont, a.font, 1)
 		}
 	}
 	sendMessage(a.processCombo, cbSetItemHeight, ^uintptr(0), uintptr(a.s(34)))
 	sendMessage(a.processCombo, cbSetItemHeight, 0, uintptr(a.s(32)))
+	for _, hwnd := range []uintptr{a.pipSizeCombo, a.pipFPSCombo} {
+		if hwnd != 0 {
+			sendMessage(hwnd, cbSetItemHeight, ^uintptr(0), uintptr(a.s(32)))
+			sendMessage(hwnd, cbSetItemHeight, 0, uintptr(a.s(28)))
+		}
+	}
 }
 
 func (a *application) text(hdc uintptr, text string, box rect, font, color uintptr, flags uintptr) {
@@ -86,7 +92,8 @@ func (a *application) paintMain(hwnd uintptr) {
 	var bounds rect
 	getClientRect(hwnd, &bounds)
 	procFillRect.Call(hdc, uintptr(unsafe.Pointer(&bounds)), a.bgBrush)
-	w, h := bounds.right*96/a.dpi, bounds.bottom*96/a.dpi
+	w, h := bounds.right*96/a.dpi, max(mainContentHeight, bounds.bottom*96/a.dpi)
+	procSetViewportOrg.Call(hdc, 0, uintptr(-a.s(a.scroll)), 0)
 	label := func(text string, x, y, width, height int32, font, color uintptr) {
 		a.text(hdc, text, a.box(x, y, width, height), font, color, dtLeft)
 	}
@@ -104,6 +111,11 @@ func (a *application) paintMain(hwnd uintptr) {
 	label("One press, held until you stop.", 28, 339, w-205, 22, a.smallFont, colorMuted)
 	label("Toggle hotkey", 28, 386, w-255, 24, a.font, colorText)
 	label("Keyboard or mouse button", 28, 415, w-245, 22, a.smallFont, colorMuted)
+	fill(hdc, a.box(28, 449, w-56, 1), colorBorder)
+	label("Picture-in-picture", 28, 466, w-200, 24, a.font, colorText)
+	label("Optional preview / Windows 11 24H2+", 28, 502, w-56, 22, a.smallFont, colorMuted)
+	label("MAX. PREVIEW SIZE", 28, 527, 230, 20, a.smallFont, colorMuted)
+	label("REFRESH LIMIT", w-198, 527, 170, 20, a.smallFont, colorMuted)
 	fill(hdc, a.box(28, h-141, w-56, 1), colorBorder)
 	statusColor := colorMuted
 	if a.statusError {
@@ -123,6 +135,24 @@ func (a *application) paintMain(hwnd uintptr) {
 }
 
 func (a *application) drawItem(item *drawItemStruct) {
+	if item.ctlID == idPIPSize || item.ctlID == idPIPFPS {
+		text := ""
+		index := int(item.itemID)
+		if item.ctlID == idPIPSize && index >= 0 && index < len(pipSizes) {
+			text = pipSizes[index].label
+		} else if item.ctlID == idPIPFPS && index >= 0 && index < len(pipFrameRates) {
+			text = fmt.Sprintf("%d FPS", pipFrameRates[index])
+		}
+		background := colorField
+		if item.itemState&odsSelected != 0 {
+			background = rgb(40, 65, 55)
+		}
+		fill(item.hdc, item.rcItem, background)
+		box := item.rcItem
+		box.left += a.s(8)
+		a.text(item.hdc, text, box, a.font, colorText, dtLeft)
+		return
+	}
 	if item.ctlID == idProcess {
 		background, foreground := colorField, colorText
 		if item.itemState&odsSelected != 0 {
@@ -150,6 +180,11 @@ func (a *application) drawItem(item *drawItemStruct) {
 	background, foreground, border := colorField, colorText, colorBorder
 	text := ""
 	switch item.ctlID {
+	case idPIP:
+		text = "OFF"
+		if a.pip.enabled {
+			text, background, foreground = "ON", rgb(32, 66, 49), colorGreen
+		}
 	case idHold:
 		text = "OFF"
 		if a.hold {
