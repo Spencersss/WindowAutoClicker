@@ -23,7 +23,6 @@ var pipFrameRates = [...]int{1, 2, 5, 10, 15, 30}
 var (
 	pipCallback         = syscall.NewCallback(pipWindowProc)
 	pipIsIconic         = user32.NewProc("IsIconic")
-	pipScreenToClient   = user32.NewProc("ScreenToClient")
 	pipStretchDIBits    = gdi32.NewProc("StretchDIBits")
 	pipGetDpiForWindow  = user32.NewProc("GetDpiForWindow")
 	pipAdjustWindowRect = user32.NewProc("AdjustWindowRectExForDpi")
@@ -46,6 +45,7 @@ type pictureInPicture struct {
 	frame               captureResult
 	lastFrame           time.Time
 	note                string
+	dragging            bool
 }
 
 func (a *application) enablePIP() {
@@ -123,6 +123,7 @@ func (a *application) stopPIP() {
 		a.pip.font = 0
 	}
 	a.pip.frame = captureResult{}
+	a.pip.dragging = false
 	a.syncPIPButton()
 }
 
@@ -187,6 +188,7 @@ func (a *application) tickPIP() {
 		}
 		if frame.width > 0 && frame.height > 0 && len(frame.pixels) == frame.width*frame.height*4 {
 			p.frame, p.lastFrame = frame, time.Now()
+			a.resizePIPToFrame(frame.width, frame.height)
 			changed = true
 		}
 	default:
@@ -205,6 +207,19 @@ func (a *application) tickPIP() {
 	if changed {
 		procInvalidateRect.Call(p.hwnd, 0, 0)
 	}
+}
+
+func (a *application) resizePIPToFrame(width, height int) {
+	if a.pip.hwnd == 0 || width < 1 || height < 1 {
+		return
+	}
+	wantWidth := int32(width) + a.pip.s(2)
+	wantHeight := int32(height) + a.pip.s(2)
+	var current rect
+	if getClientRect(a.pip.hwnd, &current) && current.right == wantWidth && current.bottom == wantHeight {
+		return
+	}
+	procSetWindowPos.Call(a.pip.hwnd, ^uintptr(0), 0, 0, uintptr(wantWidth), uintptr(wantHeight), swpNoMove|swpNoActivate|swpShowWindow)
 }
 
 func (a *application) ensurePIPWindow() error {
@@ -286,8 +301,17 @@ func pipWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintptr
 		// Match tcpowell/picture-in-picture: Shift+drag moves the entire
 		// borderless preview without requiring a title bar or close button.
 		if state, _, _ := pipGetKeyState.Call(vkShift); int32(state)&0x8000 != 0 {
+			a.pip.dragging = true
 			pipReleaseCapture.Call()
 			sendMessage(hwnd, 0x00A1, 2, 0) // WM_NCLBUTTONDOWN / HTCAPTION
+		}
+		return 0
+	case wmLButtonUp, 0x00A2: // WM_NCLBUTTONUP
+		wasDragging := a.pip.dragging
+		a.pip.dragging = false
+		if !wasDragging && a.pip.target.hwnd != 0 && isWindow(a.pip.target.hwnd) {
+			procShowWindow.Call(a.pip.target.hwnd, 9) // SW_RESTORE
+			procSetForegroundWindow.Call(a.pip.target.hwnd)
 		}
 		return 0
 	case wmClose:

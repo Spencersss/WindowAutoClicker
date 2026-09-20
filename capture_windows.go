@@ -31,6 +31,7 @@ type capGUID struct {
 	Data4        [8]byte
 }
 type capSize struct{ Width, Height int32 }
+type capCrop struct{ Left, Top, Width, Height int }
 type capTextureDesc struct {
 	Width, Height, MipLevels, ArraySize, Format uint32
 	SampleCount, SampleQuality                  uint32
@@ -60,6 +61,9 @@ var (
 	// process-wide window callbacks are still registered. Retain its code
 	// module like the other LazyDLL imports, independently of COM objects.
 	capGraphicsCapture                    = syscall.NewLazyDLL("GraphicsCapture.dll")
+	capGetClientRect                      = user32.NewProc("GetClientRect")
+	capClientToScreen                     = user32.NewProc("ClientToScreen")
+	capGetWindowRect                      = user32.NewProc("GetWindowRect")
 	capD3D11CreateDevice                  = capD3D11.NewProc("D3D11CreateDevice")
 	capWrapDevice                         = capD3D11.NewProc("CreateDirect3D11DeviceFromDXGIDevice")
 	capIIDGraphicsCaptureItemInterop      = capGUID{0x3628e81b, 0x3cac, 0x4c60, [8]byte{0xb7, 0xf4, 0x23, 0xce, 0x0e, 0x0c, 0x33, 0x56}}
@@ -175,6 +179,51 @@ func capSend(out chan captureResult, r captureResult) {
 }
 func capValidSize(s capSize) bool {
 	return s.Width > 0 && s.Height > 0 && s.Width <= maxCaptureWidth && s.Height <= maxCaptureHeight && int64(s.Width)*int64(s.Height) <= maxCaptureArea
+}
+
+// capClientCrop maps the target's client rectangle into the full HWND capture.
+// Graphics Capture includes non-client chrome for normal windows, so cropping
+// here keeps the preview focused on the application's visual content.
+func capClientCrop(hwnd uintptr, source capSize) capCrop {
+	full := capCrop{Width: int(source.Width), Height: int(source.Height)}
+	if hwnd == 0 || source.Width < 1 || source.Height < 1 {
+		return full
+	}
+	var client rect
+	var origin point
+	var window rect
+	if r, _, _ := capGetClientRect.Call(hwnd, uintptr(unsafe.Pointer(&client))); r == 0 {
+		return full
+	}
+	if r, _, _ := capClientToScreen.Call(hwnd, uintptr(unsafe.Pointer(&origin))); r == 0 {
+		return full
+	}
+	if r, _, _ := capGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&window))); r == 0 {
+		return full
+	}
+	left := int(origin.x - window.left)
+	top := int(origin.y - window.top)
+	width := int(client.right - client.left)
+	height := int(client.bottom - client.top)
+	if left < 0 || top < 0 || width < 1 || height < 1 || left >= full.Width || top >= full.Height {
+		return full
+	}
+	width = min(width, full.Width-left)
+	height = min(height, full.Height-top)
+	if width < 1 || height < 1 {
+		return full
+	}
+	return capCrop{Left: left, Top: top, Width: width, Height: height}
+}
+
+// capOutputSize fits a crop within the configured preview bounds without
+// padding. The returned dimensions are the actual image/window dimensions.
+func capOutputSize(srcW, srcH, maxW, maxH int) (int, int) {
+	if srcW < 1 || srcH < 1 || maxW < 1 || maxH < 1 {
+		return 0, 0
+	}
+	_, _, width, height := capAspectFit(srcW, srcH, maxW, maxH)
+	return width, height
 }
 
 // Windows x64 passes the eight-byte SizeInt32 struct by value in one slot.
@@ -324,12 +373,20 @@ func capWorker(cancel <-chan struct{}, target targetWindow, opt captureOptions, 
 				size = contentSize
 				continue
 			}
-			pixels, err := capReadFrame(dev, ctx, frame, contentSize, opt, &staging, &stagingSize)
+			crop := capClientCrop(target.hwnd, contentSize)
+			outputWidth, outputHeight := capOutputSize(crop.Width, crop.Height, opt.width, opt.height)
+			if outputWidth < 1 || outputHeight < 1 {
+				capCloseRelease(frame)
+				continue
+			}
+			readOptions := opt
+			readOptions.width, readOptions.height = outputWidth, outputHeight
+			pixels, err := capReadFrame(dev, ctx, frame, contentSize, crop, readOptions, &staging, &stagingSize)
 			capCloseRelease(frame)
 			if err != nil {
 				return err
 			}
-			capSend(out, captureResult{pixels: pixels, width: opt.width, height: opt.height})
+			capSend(out, captureResult{pixels: pixels, width: outputWidth, height: outputHeight})
 		}
 	}
 }
@@ -343,7 +400,7 @@ func capCreateItem(hwnd uintptr) (unsafe.Pointer, error) {
 	err = capError("CreateForWindow", capCall(f, 3, hwnd, uintptr(unsafe.Pointer(&capIIDGraphicsCaptureItem)), uintptr(unsafe.Pointer(&p))))
 	return p, err
 }
-func capReadFrame(dev, ctx, frame unsafe.Pointer, size capSize, opt captureOptions, staging *unsafe.Pointer, stagingSize *capSize) ([]byte, error) {
+func capReadFrame(dev, ctx, frame unsafe.Pointer, size capSize, crop capCrop, opt captureOptions, staging *unsafe.Pointer, stagingSize *capSize) ([]byte, error) {
 	var surface unsafe.Pointer
 	if err := capError("frame Surface", capCall(frame, 6, uintptr(unsafe.Pointer(&surface)))); err != nil {
 		return nil, err
@@ -386,18 +443,35 @@ func capReadFrame(dev, ctx, frame unsafe.Pointer, size capSize, opt captureOptio
 	if mapped.Data == nil || uint64(mapped.RowPitch) < uint64(desc.Width)*4 {
 		return nil, fmt.Errorf("capture texture has invalid row pitch")
 	}
-	return capSampleBGRA(mapped.Data, int(mapped.RowPitch), int(size.Width), int(size.Height), opt.width, opt.height), nil
+	return capSampleBGRAOffset(mapped.Data, int(mapped.RowPitch), int(size.Width), int(size.Height), crop, opt.width, opt.height), nil
 }
 func capSampleBGRA(src unsafe.Pointer, pitch, w, h, dw, dh int) []byte {
+	return capSampleBGRAWithFit(src, pitch, w, h, capCrop{Width: w, Height: h}, dw, dh, true)
+}
+func capSampleBGRAOffset(src unsafe.Pointer, pitch, w, h int, crop capCrop, dw, dh int) []byte {
+	// The caller has already selected aspect-fitted output dimensions. Sampling
+	// the crop across the complete output avoids a one-pixel bar caused by
+	// integer rounding when those dimensions are used a second time.
+	return capSampleBGRAWithFit(src, pitch, w, h, crop, dw, dh, false)
+}
+func capSampleBGRAWithFit(src unsafe.Pointer, pitch, w, h int, crop capCrop, dw, dh int, fit bool) []byte {
 	out := make([]byte, dw*dh*4)
 	for i := 3; i < len(out); i += 4 {
 		out[i] = 255
 	}
-	x, y, sw, sh := capAspectFit(w, h, dw, dh)
+	if crop.Left < 0 || crop.Top < 0 || crop.Width < 1 || crop.Height < 1 || crop.Left+crop.Width > w || crop.Top+crop.Height > h {
+		return out
+	}
+	x, y, sw, sh := 0, 0, dw, dh
+	if fit {
+		x, y, sw, sh = capAspectFit(crop.Width, crop.Height, dw, dh)
+	}
 	for j := 0; j < sh; j++ {
-		row := unsafe.Slice((*byte)(unsafe.Add(src, j*h/sh*pitch)), w*4)
+		sourceY := crop.Top + j*crop.Height/sh
+		row := unsafe.Slice((*byte)(unsafe.Add(src, sourceY*pitch)), w*4)
 		for i := 0; i < sw; i++ {
-			di, si := ((y+j)*dw+x+i)*4, i*w/sw*4
+			sourceX := crop.Left + i*crop.Width/sw
+			di, si := ((y+j)*dw+x+i)*4, sourceX*4
 			copy(out[di:di+3], row[si:si+3])
 		}
 	}

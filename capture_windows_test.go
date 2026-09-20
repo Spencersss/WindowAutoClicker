@@ -27,6 +27,21 @@ func TestCaptureAspectFit(t *testing.T) {
 	}
 }
 
+func TestCaptureOutputSize(t *testing.T) {
+	for _, test := range []struct {
+		srcW, srcH, maxW, maxH int
+		wantW, wantH           int
+	}{
+		{1920, 1080, 320, 180, 320, 180},
+		{1080, 1920, 320, 180, 101, 180},
+		{460, 300, 320, 180, 276, 180},
+	} {
+		if gotW, gotH := capOutputSize(test.srcW, test.srcH, test.maxW, test.maxH); gotW != test.wantW || gotH != test.wantH {
+			t.Errorf("capOutputSize(%d, %d, %d, %d) = %dx%d, want %dx%d", test.srcW, test.srcH, test.maxW, test.maxH, gotW, gotH, test.wantW, test.wantH)
+		}
+	}
+}
+
 func TestCaptureOptionsAndLatestResult(t *testing.T) {
 	if got := capNormalizeOptions(captureOptions{}); got != (captureOptions{320, 180, 5}) {
 		t.Fatalf("defaults = %+v", got)
@@ -55,6 +70,23 @@ func TestCaptureSamplePaddedRows(t *testing.T) {
 	want := []byte{0, 0, 0, 255, 1, 2, 3, 255, 4, 5, 6, 255, 0, 0, 0, 255, 0, 0, 0, 255, 7, 8, 9, 255, 10, 11, 12, 255, 0, 0, 0, 255}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("sample = %v, want %v", got, want)
+	}
+	runtime.KeepAlive(src)
+}
+
+func TestCaptureSampleClientCrop(t *testing.T) {
+	// Four-by-four BGRA source with one pixel of non-client content around a
+	// two-by-two client rectangle. Each pixel's blue byte identifies its source.
+	src := make([]byte, 4*4*4)
+	for y := 0; y < 4; y++ {
+		for x := 0; x < 4; x++ {
+			src[(y*4+x)*4] = byte(y*4 + x + 1)
+		}
+	}
+	got := capSampleBGRAOffset(unsafe.Pointer(&src[0]), 16, 4, 4, capCrop{Left: 1, Top: 1, Width: 2, Height: 2}, 2, 2)
+	want := []byte{6, 0, 0, 255, 7, 0, 0, 255, 10, 0, 0, 255, 11, 0, 0, 255}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("cropped sample = %v, want %v", got, want)
 	}
 	runtime.KeepAlive(src)
 }
@@ -101,7 +133,7 @@ func TestCaptureIntegration(t *testing.T) {
 				if frame.err != nil {
 					t.Fatal(frame.err)
 				}
-				if frame.width != 320 || frame.height != 180 || len(frame.pixels) != 320*180*4 {
+				if frame.width < 1 || frame.height < 1 || frame.width > 320 || frame.height > 180 || len(frame.pixels) != frame.width*frame.height*4 {
 					t.Fatalf("bad frame: %dx%d, %d bytes", frame.width, frame.height, len(frame.pixels))
 				}
 				count++
@@ -113,9 +145,9 @@ func TestCaptureIntegration(t *testing.T) {
 			}
 		}
 		if len(last.pixels) > 0 {
-			left, right := 320, -1
-			for x := 0; x < 320; x++ {
-				i := (90*320 + x) * 4
+			left, right := last.width, -1
+			for x := 0; x < last.width; x++ {
+				i := (last.height/2*last.width + x) * 4
 				if last.pixels[i] > 20 || last.pixels[i+1] > 20 || last.pixels[i+2] > 20 {
 					left = min(left, x)
 					right = max(right, x)
@@ -159,16 +191,14 @@ func TestCaptureIntegration(t *testing.T) {
 	setWindowText(fixture.label, "CHANGED PIXELS\r\nCapture is receiving live content\r\nABCDEFGHIJKLMNOPQRSTUVWXYZ\r\n012345678901234567890123456789\r\nCHANGED PIXELS")
 	_ = waitFrame(c, func(f captureResult) bool { return nonempty(f) && !bytes.Equal(f.pixels, first.pixels) })
 	t.Log("received nonempty BGRA frame and changed source pixels")
-	// Portrait resize changes letterbox geometry, proving Recreate delivered
-	// a correctly sized new source rather than stale or stretched old data.
-	// Keep the source changing: WGC need not emit unchanged desktop content.
+	// Portrait and landscape resizes should produce new aspect-fitted dimensions
+	// rather than stale frames or black-bar padding.
 	animate = true
 	if ok, _, err := procSetWindowPos.Call(hwnd, 0, 0, 0, 300, 500, 0x0002|0x0004); ok == 0 {
 		t.Fatal(err)
 	}
 	portrait := waitFrame(c, func(f captureResult) bool {
-		i := (f.height/2*f.width + 50) * 4
-		return nonempty(f) && f.pixels[i] == 0 && f.pixels[i+1] == 0 && f.pixels[i+2] == 0
+		return nonempty(f) && f.width < f.height
 	})
 	if bytes.Equal(first.pixels, portrait.pixels) {
 		t.Fatal("resize returned unchanged pixels")
@@ -177,8 +207,7 @@ func TestCaptureIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = waitFrame(c, func(f captureResult) bool {
-		i := (f.height/2*f.width + 50) * 4
-		return nonempty(f) && (f.pixels[i] > 20 || f.pixels[i+1] > 20 || f.pixels[i+2] > 20)
+		return nonempty(f) && f.width > f.height
 	})
 	t.Log("capture survived portrait and landscape resize")
 	animate = false
