@@ -103,7 +103,8 @@ const (
 	swpNoSize     = 0x0001
 	swpNoMove     = 0x0002
 
-	swShow = 5
+	swShow           = 5
+	swShowNoActivate = 4
 
 	gwOwner    = 4
 	gwlExStyle = -20

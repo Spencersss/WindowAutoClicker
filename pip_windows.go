@@ -33,6 +33,7 @@ var (
 	pipUnregisterClass        = user32.NewProc("UnregisterClassW")
 	pipGetKeyState            = user32.NewProc("GetKeyState")
 	pipReleaseCapture         = user32.NewProc("ReleaseCapture")
+	pipGetForegroundWindow    = user32.NewProc("GetForegroundWindow")
 )
 
 // All preview state belongs to the UI thread. The capture worker only publishes
@@ -50,6 +51,7 @@ type pictureInPicture struct {
 	lastFrame           time.Time
 	note                string
 	dragging            bool
+	hiddenForFocus      bool
 }
 
 func (a *application) enablePIP() {
@@ -128,6 +130,7 @@ func (a *application) stopPIP() {
 	}
 	a.pip.frame = captureResult{}
 	a.pip.dragging = false
+	a.pip.hiddenForFocus = false
 	a.syncPIPButton()
 }
 
@@ -177,6 +180,7 @@ func (a *application) tickPIP() {
 		p.lastFrame = time.Now()
 		p.worker = startWindowCapture(p.target, p.options)
 	}
+	a.updatePIPVisibility()
 	changed := false
 	select {
 	case frame, ok := <-p.worker.frames:
@@ -212,6 +216,24 @@ func (a *application) tickPIP() {
 	if changed {
 		procInvalidateRect.Call(p.hwnd, 0, 0)
 	}
+}
+
+func (a *application) updatePIPVisibility() {
+	p := &a.pip
+	if p.hwnd == 0 || p.target.hwnd == 0 {
+		return
+	}
+	foreground, _, _ := pipGetForegroundWindow.Call()
+	focused := foreground != 0 && p.target.pid != 0 && windowPID(foreground) == p.target.pid
+	if focused == p.hiddenForFocus {
+		return
+	}
+	if focused {
+		procShowWindow.Call(p.hwnd, swHide)
+	} else {
+		procShowWindow.Call(p.hwnd, swShowNoActivate)
+	}
+	p.hiddenForFocus = focused
 }
 
 func pipFrameIsBlank(frame captureResult) bool {
@@ -270,6 +292,7 @@ func (a *application) ensurePIPWindow() error {
 	// An independent non-activating tool window stays visible when the main
 	// settings window is minimized into the tray, without stealing target focus.
 	procSetWindowPos.Call(p.hwnd, ^uintptr(0), 0, 0, uintptr(width), uintptr(height), swpNoMove|swpNoActivate|swpShowWindow)
+	p.hiddenForFocus = false
 	procInvalidateRect.Call(p.hwnd, 0, 0)
 	return nil
 }
