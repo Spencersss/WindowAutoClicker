@@ -2,37 +2,126 @@ name: Build and Release Clicker
 
 on:
   push:
-    branches: [master]  # Trigger on pushes to the main branch
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
-  build-and-release:
-    runs-on: ubuntu-latest  # Use a suitable runner for .NET 6
-
+  validate:
+    name: Validate Windows build
+    runs-on: windows-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v3  # Checkout the repository code
+      - name: Check out source
+        uses: actions/checkout@v4
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v2
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          dotnet-version: 6.0.x
+          go-version-file: go.mod
+          architecture: amd64
+          cache: false
 
-      - name: Restore dependencies
-        run: dotnet restore
+      - name: Run tests
+        shell: pwsh
+        env:
+          SPENCER_CLICKER_SKIP_SHELL_TEST: '1'
+        run: go test -count=1 -v .
 
-      - name: Build and publish
-        run: dotnet publish -p:PublishProfile=FolderProfile
+      - name: Run vet
+        shell: pwsh
+        run: go vet -unsafeptr=false .
 
-      - name: Get short SHA
+      - name: Build executable
+        shell: pwsh
+        run: .\build.ps1
+
+      - name: Package release assets
+        shell: pwsh
+        env:
+          COMMIT_SHA: ${{ github.sha }}
         run: |
-          short_sha=$(echo ${GITHUB_SHA} | cut -c -7)
-          echo "SHORT_SHA=$short_sha" >> $GITHUB_ENV
+          $sha = $env:COMMIT_SHA.Substring(0, 7)
+          $zipPath = "dist/spencer-clicker-$sha.zip"
+          if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
+          Compress-Archive -LiteralPath 'dist/spencer-clicker.exe' -DestinationPath $zipPath
+          if (-not (Test-Path -LiteralPath 'dist/spencer-clicker.exe')) { throw 'Executable asset was not created.' }
+          if (-not (Test-Path -LiteralPath $zipPath)) { throw 'Zip asset was not created.' }
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: spencer-clicker-release
+          if-no-files-found: error
+          path: |
+            dist/spencer-clicker.exe
+            dist/spencer-clicker-*.zip
+
+  release:
+    name: Publish GitHub release
+    needs: validate
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: spencer-clicker-release
+          path: release-assets
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v0.1.15
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: ${{ env.SHORT_SHA }}
-          name: Release ${{ env.SHORT_SHA }}
-          draft: false
-          prerelease: false
-          files: ./SpencerAutoClicker/Output/SpencerAutoClicker.exe
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          $sha = $env:COMMIT_SHA.Substring(0, 7)
+          $zipPath = Join-Path $PWD "release-assets\spencer-clicker-$sha.zip"
+
+          $tagRef = gh api --include "repos/$env:GH_REPO/git/ref/tags/$sha" 2>&1
+          $tagRefExit = $LASTEXITCODE
+          $tagRefText = ($tagRef -join "`n")
+          if ($tagRefExit -eq 0) {
+            $resolvedCommit = gh api "repos/$env:GH_REPO/commits/$sha" --jq .sha 2>&1
+            $resolvedCommitExit = $LASTEXITCODE
+            if ($resolvedCommitExit -ne 0) {
+              $resolvedCommitText = ($resolvedCommit -join "`n")
+              throw "Could not resolve existing tag $sha to a commit: $resolvedCommitText"
+            }
+            if (($resolvedCommit -join '').Trim().ToLowerInvariant() -ne $env:COMMIT_SHA.ToLowerInvariant()) {
+              throw "Existing tag $sha does not point to commit $env:COMMIT_SHA. Refusing to move the tag or overwrite its release."
+            }
+          } elseif ($tagRefText -notmatch 'HTTP/\S+\s+404\b|404 Not Found') {
+            throw "Could not determine whether tag $sha exists: $tagRefText"
+          }
+
+          $releaseProbe = gh api --include "repos/$env:GH_REPO/releases/tags/$sha" 2>&1
+          $probeExit = $LASTEXITCODE
+          $probeText = ($releaseProbe -join "`n")
+
+          if ($probeExit -eq 0) {
+            gh release upload $sha `
+              'release-assets\spencer-clicker.exe' `
+              $zipPath `
+              --repo $env:GH_REPO `
+              --clobber
+            if ($LASTEXITCODE -ne 0) { throw 'Updating the existing GitHub release failed.' }
+          } elseif ($probeText -match 'HTTP/\S+\s+404\b|404 Not Found') {
+            gh release create $sha `
+              'release-assets\spencer-clicker.exe' `
+              $zipPath `
+              --repo $env:GH_REPO `
+              --target $env:COMMIT_SHA `
+              --title "Release $sha" `
+              --generate-notes
+            if ($LASTEXITCODE -ne 0) { throw 'Creating the GitHub release failed.' }
+          } else {
+            throw "Could not determine whether release $sha exists: $probeText"
+          }
