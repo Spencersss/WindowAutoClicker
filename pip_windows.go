@@ -21,14 +21,18 @@ var pipSizes = [...]struct {
 }
 var pipFrameRates = [...]int{1, 2, 5, 10, 15, 30}
 var (
-	pipCallback         = syscall.NewCallback(pipWindowProc)
-	pipIsIconic         = user32.NewProc("IsIconic")
-	pipStretchDIBits    = gdi32.NewProc("StretchDIBits")
-	pipGetDpiForWindow  = user32.NewProc("GetDpiForWindow")
-	pipAdjustWindowRect = user32.NewProc("AdjustWindowRectExForDpi")
-	pipUnregisterClass  = user32.NewProc("UnregisterClassW")
-	pipGetKeyState      = user32.NewProc("GetKeyState")
-	pipReleaseCapture   = user32.NewProc("ReleaseCapture")
+	pipCallback               = syscall.NewCallback(pipWindowProc)
+	pipIsIconic               = user32.NewProc("IsIconic")
+	pipStretchDIBits          = gdi32.NewProc("StretchDIBits")
+	pipCreateCompatibleDC     = gdi32.NewProc("CreateCompatibleDC")
+	pipCreateCompatibleBitmap = gdi32.NewProc("CreateCompatibleBitmap")
+	pipBitBlt                 = gdi32.NewProc("BitBlt")
+	pipDeleteDC               = gdi32.NewProc("DeleteDC")
+	pipGetDpiForWindow        = user32.NewProc("GetDpiForWindow")
+	pipAdjustWindowRect       = user32.NewProc("AdjustWindowRectExForDpi")
+	pipUnregisterClass        = user32.NewProc("UnregisterClassW")
+	pipGetKeyState            = user32.NewProc("GetKeyState")
+	pipReleaseCapture         = user32.NewProc("ReleaseCapture")
 )
 
 // All preview state belongs to the UI thread. The capture worker only publishes
@@ -186,7 +190,8 @@ func (a *application) tickPIP() {
 			a.setStatus("PiP capture ended. Toggle it on to retry.", true)
 			return
 		}
-		if frame.width > 0 && frame.height > 0 && len(frame.pixels) == frame.width*frame.height*4 {
+		if frame.width > 0 && frame.height > 0 && len(frame.pixels) == frame.width*frame.height*4 &&
+			(len(p.frame.pixels) == 0 || !pipFrameIsBlank(frame)) {
 			p.frame, p.lastFrame = frame, time.Now()
 			a.resizePIPToFrame(frame.width, frame.height)
 			changed = true
@@ -207,6 +212,15 @@ func (a *application) tickPIP() {
 	if changed {
 		procInvalidateRect.Call(p.hwnd, 0, 0)
 	}
+}
+
+func pipFrameIsBlank(frame captureResult) bool {
+	for i := 0; i+2 < len(frame.pixels); i += 4 {
+		if frame.pixels[i] > 2 || frame.pixels[i+1] > 2 || frame.pixels[i+2] > 2 {
+			return false
+		}
+	}
+	return len(frame.pixels) != 0
 }
 
 func (a *application) resizePIPToFrame(width, height int) {
@@ -341,6 +355,33 @@ func (a *application) paintPIP(hwnd uintptr) {
 	defer procEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 	var bounds rect
 	getClientRect(hwnd, &bounds)
+	width, height := bounds.right-bounds.left, bounds.bottom-bounds.top
+	if width < 1 || height < 1 {
+		return
+	}
+	// Paint into a compatible bitmap first. The preview is invalidated at the
+	// capture rate, so presenting the background and image as one BitBlt avoids
+	// the visible erase/draw flash that direct GDI painting can cause.
+	bufferDC, _, _ := pipCreateCompatibleDC.Call(hdc)
+	if bufferDC == 0 {
+		a.paintPIPContents(hdc, bounds)
+		return
+	}
+	bufferBitmap, _, _ := pipCreateCompatibleBitmap.Call(hdc, uintptr(width), uintptr(height))
+	if bufferBitmap == 0 {
+		pipDeleteDC.Call(bufferDC)
+		a.paintPIPContents(hdc, bounds)
+		return
+	}
+	previous, _, _ := procSelectObject.Call(bufferDC, bufferBitmap)
+	a.paintPIPContents(bufferDC, bounds)
+	pipBitBlt.Call(hdc, 0, 0, uintptr(width), uintptr(height), bufferDC, 0, 0, 0x00CC0020)
+	procSelectObject.Call(bufferDC, previous)
+	procDeleteObject.Call(bufferBitmap)
+	pipDeleteDC.Call(bufferDC)
+}
+
+func (a *application) paintPIPContents(hdc uintptr, bounds rect) {
 	procFillRect.Call(hdc, uintptr(unsafe.Pointer(&bounds)), a.bgBrush)
 	// The reference PiP has no title bar or controls: image plus a subtle frame.
 	roundBox(hdc, bounds, colorBG, colorBorder, a.pip.s(3))

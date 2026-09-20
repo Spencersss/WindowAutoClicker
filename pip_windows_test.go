@@ -86,6 +86,15 @@ func TestPIPDefaultsAndOptionsWhileClickerRuns(t *testing.T) {
 	}
 }
 
+func TestPIPFrameBlankDetection(t *testing.T) {
+	if !pipFrameIsBlank(captureResult{width: 2, height: 1, pixels: []byte{0, 0, 0, 255, 2, 2, 2, 255}}) {
+		t.Fatal("dark frame was not classified as blank")
+	}
+	if pipFrameIsBlank(captureResult{width: 1, height: 1, pixels: []byte{3, 0, 0, 255}}) {
+		t.Fatal("visible frame was classified as blank")
+	}
+}
+
 func TestPIPWindowIsNonActivatingAndClosable(t *testing.T) {
 	runtime.LockOSThread()
 	t.Cleanup(runtime.UnlockOSThread)

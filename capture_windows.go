@@ -68,6 +68,7 @@ var (
 	capWrapDevice                         = capD3D11.NewProc("CreateDirect3D11DeviceFromDXGIDevice")
 	capIIDGraphicsCaptureItemInterop      = capGUID{0x3628e81b, 0x3cac, 0x4c60, [8]byte{0xb7, 0xf4, 0x23, 0xce, 0x0e, 0x0c, 0x33, 0x56}}
 	capIIDGraphicsCaptureItem             = capGUID{0x79c3f95b, 0x31f7, 0x4ec2, [8]byte{0xa4, 0x64, 0x63, 0x2e, 0xf5, 0xd3, 0x07, 0x60}}
+	capIIDGraphicsCaptureSession3         = capGUID{0xf2cdd966, 0x22ae, 0x5ea1, [8]byte{0x95, 0x96, 0x3a, 0x28, 0x93, 0x44, 0xc3, 0xbe}}
 	capIIDGraphicsCaptureSession5         = capGUID{0x67c0ea62, 0x1f85, 0x5061, [8]byte{0x92, 0x5a, 0x23, 0x9b, 0xe0, 0xac, 0x09, 0xcb}}
 	capIIDGraphicsCaptureFramePoolStatics = capGUID{0x589b103f, 0x6bbc, 0x5df5, [8]byte{0xa9, 0x91, 0x02, 0xe2, 0x8b, 0x3b, 0x66, 0xd5}}
 	capIIDDXGIDevice                      = capGUID{0x54ec77fa, 0x1377, 0x44e6, [8]byte{0x8c, 0x32, 0x88, 0xfd, 0x5f, 0x44, 0xc8, 0x4c}}
@@ -298,6 +299,14 @@ func capWorker(cancel <-chan struct{}, target targetWindow, opt captureOptions, 
 		return err
 	}
 	defer capCloseRelease(session)
+	// Windows 11 can suppress the system's yellow capture indicator. This is
+	// best-effort: older builds or policies may not expose the interface, and
+	// capture should continue normally when they do not.
+	var s3 unsafe.Pointer
+	if capQI(session, &capIIDGraphicsCaptureSession3, &s3) == nil {
+		capCall(s3, 7, 0) // IGraphicsCaptureSession3::put_IsBorderRequired(false)
+		capRelease(s3)
+	}
 	var s5 unsafe.Pointer
 	if err := capQI(session, &capIIDGraphicsCaptureSession5, &s5); err != nil {
 		return fmt.Errorf("preview FPS control requires Windows 11 24H2 or newer (GraphicsCaptureSession5): %w", err)
