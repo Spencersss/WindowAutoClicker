@@ -95,6 +95,31 @@ func TestPIPFrameBlankDetection(t *testing.T) {
 	}
 }
 
+func TestPIPVisibilityTracksTargetFocus(t *testing.T) {
+	runtime.LockOSThread()
+	t.Cleanup(runtime.UnlockOSThread)
+	a := newPIPTestApplication(t)
+	target := makeFixture(t, true)
+	t.Cleanup(func() { procDestroyWindow.Call(target) })
+	a.pip.enabled = true
+	a.pip.target = targetWindow{hwnd: target, pid: windowPID(target)}
+	if err := a.ensurePIPWindow(); err != nil {
+		t.Fatal(err)
+	}
+	procShowWindow.Call(target, swShow)
+	procSetForegroundWindow.Call(target)
+	pumpFor(50 * time.Millisecond)
+	foreground, _, _ := pipGetForegroundWindow.Call()
+	if windowPID(foreground) != a.pip.target.pid {
+		t.Skipf("desktop did not grant foreground to fixture (foreground pid %d)", windowPID(foreground))
+	}
+	a.updatePIPVisibility()
+	isWindowVisible := user32.NewProc("IsWindowVisible")
+	if visible, _, _ := isWindowVisible.Call(a.pip.hwnd); visible != 0 {
+		t.Fatalf("PiP remained visible while target process %d was foreground (foreground pid %d)", a.pip.target.pid, windowPID(foreground))
+	}
+}
+
 func TestPIPWindowIsNonActivatingAndClosable(t *testing.T) {
 	runtime.LockOSThread()
 	t.Cleanup(runtime.UnlockOSThread)

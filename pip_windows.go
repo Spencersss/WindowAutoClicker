@@ -34,6 +34,7 @@ var (
 	pipGetKeyState            = user32.NewProc("GetKeyState")
 	pipReleaseCapture         = user32.NewProc("ReleaseCapture")
 	pipGetForegroundWindow    = user32.NewProc("GetForegroundWindow")
+	pipIsWindowVisible        = user32.NewProc("IsWindowVisible")
 )
 
 // All preview state belongs to the UI thread. The capture worker only publishes
@@ -225,7 +226,13 @@ func (a *application) updatePIPVisibility() {
 	}
 	foreground, _, _ := pipGetForegroundWindow.Call()
 	focused := foreground != 0 && p.target.pid != 0 && windowPID(foreground) == p.target.pid
-	if focused == p.hiddenForFocus {
+	visible, _, _ := pipIsWindowVisible.Call(p.hwnd)
+	if focused && visible == 0 {
+		p.hiddenForFocus = true
+		return
+	}
+	if !focused && visible != 0 {
+		p.hiddenForFocus = false
 		return
 	}
 	if focused {
