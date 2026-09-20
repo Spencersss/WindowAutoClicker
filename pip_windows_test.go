@@ -113,6 +113,9 @@ func TestPIPVisibilityTracksTargetFocus(t *testing.T) {
 	if windowPID(foreground) != a.pip.target.pid {
 		t.Skipf("desktop did not grant foreground to fixture (foreground pid %d)", windowPID(foreground))
 	}
+	time.Sleep(pipFocusSettle)
+	a.updatePIPVisibility()
+	time.Sleep(pipFocusSettle)
 	a.updatePIPVisibility()
 	isWindowVisible := user32.NewProc("IsWindowVisible")
 	if visible, _, _ := isWindowVisible.Call(a.pip.hwnd); visible != 0 {

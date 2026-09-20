@@ -9,6 +9,7 @@ import (
 
 const pipTimerID = healthTimerID - 1
 const pipClassName = "SpencerClickerPreview"
+const pipFocusSettle = 250 * time.Millisecond
 
 var pipSizes = [...]struct {
 	label         string
@@ -53,6 +54,8 @@ type pictureInPicture struct {
 	note                string
 	dragging            bool
 	hiddenForFocus      bool
+	focusCandidate      bool
+	focusCandidateAt    time.Time
 }
 
 func (a *application) enablePIP() {
@@ -132,6 +135,8 @@ func (a *application) stopPIP() {
 	a.pip.frame = captureResult{}
 	a.pip.dragging = false
 	a.pip.hiddenForFocus = false
+	a.pip.focusCandidate = false
+	a.pip.focusCandidateAt = time.Time{}
 	a.syncPIPButton()
 }
 
@@ -226,6 +231,20 @@ func (a *application) updatePIPVisibility() {
 	}
 	foreground, _, _ := pipGetForegroundWindow.Call()
 	focused := foreground != 0 && p.target.pid != 0 && windowPID(foreground) == p.target.pid
+	now := time.Now()
+	if focused != p.focusCandidate {
+		p.focusCandidate = focused
+		p.focusCandidateAt = now
+		return
+	}
+	if p.focusCandidateAt.IsZero() {
+		p.focusCandidateAt = now
+		return
+	}
+	if now.Sub(p.focusCandidateAt) < pipFocusSettle {
+		return
+	}
+	focused = p.focusCandidate
 	visible, _, _ := pipIsWindowVisible.Call(p.hwnd)
 	if focused && visible == 0 {
 		p.hiddenForFocus = true
@@ -300,6 +319,7 @@ func (a *application) ensurePIPWindow() error {
 	// settings window is minimized into the tray, without stealing target focus.
 	procSetWindowPos.Call(p.hwnd, ^uintptr(0), 0, 0, uintptr(width), uintptr(height), swpNoMove|swpNoActivate|swpShowWindow)
 	p.hiddenForFocus = false
+	p.focusCandidateAt = time.Time{}
 	procInvalidateRect.Call(p.hwnd, 0, 0)
 	return nil
 }
