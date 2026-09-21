@@ -100,6 +100,7 @@ const (
 
 	swpNoActivate = 0x0010
 	swpShowWindow = 0x0040
+	swpNoZOrder   = 0x0004
 	swpNoSize     = 0x0001
 	swpNoMove     = 0x0002
 
