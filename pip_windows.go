@@ -9,7 +9,11 @@ import (
 
 const pipTimerID = healthTimerID - 1
 const pipClassName = "SpencerClickerPreview"
-const pipFocusSettle = 250 * time.Millisecond
+
+// Keep focus transitions responsive while still requiring a short stable
+// foreground signal so a click between windows does not cause a flash.
+const pipFocusSettle = 100 * time.Millisecond
+const pipFocusLeaveSettle = 150 * time.Millisecond
 
 var pipSizes = [...]struct {
 	label         string
@@ -35,7 +39,7 @@ var (
 	pipGetKeyState            = user32.NewProc("GetKeyState")
 	pipReleaseCapture         = user32.NewProc("ReleaseCapture")
 	pipGetForegroundWindow    = user32.NewProc("GetForegroundWindow")
-	pipIsWindowVisible        = user32.NewProc("IsWindowVisible")
+	pipGetWindowRect          = user32.NewProc("GetWindowRect")
 )
 
 // All preview state belongs to the UI thread. The capture worker only publishes
@@ -56,6 +60,8 @@ type pictureInPicture struct {
 	hiddenForFocus      bool
 	focusCandidate      bool
 	focusCandidateAt    time.Time
+	parkedForFocus      bool
+	parkX, parkY        int32
 }
 
 func (a *application) enablePIP() {
@@ -137,6 +143,7 @@ func (a *application) stopPIP() {
 	a.pip.hiddenForFocus = false
 	a.pip.focusCandidate = false
 	a.pip.focusCandidateAt = time.Time{}
+	a.pip.parkedForFocus = false
 	a.syncPIPButton()
 }
 
@@ -241,23 +248,36 @@ func (a *application) updatePIPVisibility() {
 		p.focusCandidateAt = now
 		return
 	}
-	if now.Sub(p.focusCandidateAt) < pipFocusSettle {
+	settle := pipFocusSettle
+	if !p.focusCandidate {
+		// Hiding the topmost preview can briefly perturb foreground reporting.
+		// Require a longer, stable leave transition before showing it again.
+		settle = pipFocusLeaveSettle
+	}
+	if now.Sub(p.focusCandidateAt) < settle {
 		return
 	}
 	focused = p.focusCandidate
-	visible, _, _ := pipIsWindowVisible.Call(p.hwnd)
-	if focused && visible == 0 {
+	if focused && p.parkedForFocus {
 		p.hiddenForFocus = true
 		return
 	}
-	if !focused && visible != 0 {
+	if !focused && !p.parkedForFocus {
 		p.hiddenForFocus = false
 		return
 	}
 	if focused {
-		procShowWindow.Call(p.hwnd, swHide)
+		var bounds rect
+		if r, _, _ := pipGetWindowRect.Call(p.hwnd, uintptr(unsafe.Pointer(&bounds))); r != 0 {
+			p.parkX, p.parkY = bounds.left, bounds.top
+		}
+		parkCoordinate := int32(-32000)
+		park := uintptr(uint32(parkCoordinate))
+		procSetWindowPos.Call(p.hwnd, 0, park, park, 0, 0, swpNoSize|swpNoActivate|swpNoZOrder)
+		p.parkedForFocus = true
 	} else {
-		procShowWindow.Call(p.hwnd, swShowNoActivate)
+		procSetWindowPos.Call(p.hwnd, 0, uintptr(uint32(p.parkX)), uintptr(uint32(p.parkY)), 0, 0, swpNoSize|swpNoActivate|swpNoZOrder|swpShowWindow)
+		p.parkedForFocus = false
 	}
 	p.hiddenForFocus = focused
 }
@@ -281,7 +301,11 @@ func (a *application) resizePIPToFrame(width, height int) {
 	if getClientRect(a.pip.hwnd, &current) && current.right == wantWidth && current.bottom == wantHeight {
 		return
 	}
-	procSetWindowPos.Call(a.pip.hwnd, ^uintptr(0), 0, 0, uintptr(wantWidth), uintptr(wantHeight), swpNoMove|swpNoActivate|swpShowWindow)
+	// The preview is already created/shown by ensurePIPWindow. Resizing must
+	// not re-show or re-promote the topmost window on every captured frame:
+	// doing so causes visible flashes and can perturb foreground-window state
+	// while the target application is focused.
+	procSetWindowPos.Call(a.pip.hwnd, 0, 0, 0, uintptr(wantWidth), uintptr(wantHeight), swpNoMove|swpNoActivate|swpNoZOrder)
 }
 
 func (a *application) ensurePIPWindow() error {
@@ -300,7 +324,7 @@ func (a *application) ensurePIPWindow() error {
 		var work rect
 		procSystemParametersInfo.Call(spiGetWorkArea, 0, uintptr(unsafe.Pointer(&work)), 0)
 		p.hwnd = createWindow(wsExToolWindow|wsExNoActivate|0x8, pipClassName,
-			"Spencer Clicker - Picture-in-picture", wsPopup|wsBorder,
+			"Spencer Clicker - Picture-in-picture", wsPopup,
 			work.right-width-20, work.bottom-height-20, width, height, 0, 0, a.instance)
 		if p.hwnd == 0 {
 			return fmt.Errorf("Could not create the preview window.")
@@ -317,9 +341,13 @@ func (a *application) ensurePIPWindow() error {
 	width, height = p.windowSize()
 	// An independent non-activating tool window stays visible when the main
 	// settings window is minimized into the tray, without stealing target focus.
+	if p.parkedForFocus {
+		procSetWindowPos.Call(p.hwnd, 0, uintptr(uint32(p.parkX)), uintptr(uint32(p.parkY)), 0, 0, swpNoSize|swpNoActivate|swpNoZOrder|swpShowWindow)
+	}
 	procSetWindowPos.Call(p.hwnd, ^uintptr(0), 0, 0, uintptr(width), uintptr(height), swpNoMove|swpNoActivate|swpShowWindow)
 	p.hiddenForFocus = false
 	p.focusCandidateAt = time.Time{}
+	p.parkedForFocus = false
 	procInvalidateRect.Call(p.hwnd, 0, 0)
 	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 const cbGetCountPIP = 0x0146
@@ -117,8 +118,9 @@ func TestPIPVisibilityTracksTargetFocus(t *testing.T) {
 	a.updatePIPVisibility()
 	time.Sleep(pipFocusSettle)
 	a.updatePIPVisibility()
-	isWindowVisible := user32.NewProc("IsWindowVisible")
-	if visible, _, _ := isWindowVisible.Call(a.pip.hwnd); visible != 0 {
+	var parked rect
+	pipGetWindowRect.Call(a.pip.hwnd, uintptr(unsafe.Pointer(&parked)))
+	if parked.left > -10000 || parked.top > -10000 {
 		t.Fatalf("PiP remained visible while target process %d was foreground (foreground pid %d)", a.pip.target.pid, windowPID(foreground))
 	}
 }
@@ -142,9 +144,10 @@ func TestPIPWindowIsNonActivatingAndClosable(t *testing.T) {
 	}
 	styleIndex = int32(-16) // GWL_STYLE
 	style, _, _ := getWindowLongPtr.Call(a.pip.hwnd, uintptr(styleIndex))
-	// WS_CAPTION includes WS_BORDER; allow the requested subtle border, but
-	// reject the dialog-frame/title-bar and system-button bits.
-	if style&uintptr(0x00400000|wsSysMenu|wsMinimizeBox|wsMaximizeBox) != 0 {
+	// The subtle frame is painted by the client; do not add a non-client
+	// border, since that changes the client size and forces a re-show on every
+	// captured frame.
+	if style&uintptr(wsBorder|0x00400000|wsSysMenu|wsMinimizeBox|wsMaximizeBox) != 0 {
 		t.Fatalf("PiP unexpectedly has traditional title-bar controls: %#x", style)
 	}
 	if pipWindowProc(a.pip.hwnd, 0x0084, 0, 0) != 1 {

@@ -47,6 +47,12 @@ const (
 	maxCaptureWidth  = 8192
 	maxCaptureHeight = 8192
 	maxCaptureArea   = 33554432
+
+	// ID3D11DeviceContext inherits ID3D11DeviceChild, so its four inherited
+	// methods precede the context methods in the COM vtable.
+	capCtxMap          = 14
+	capCtxUnmap        = 15
+	capCtxCopyResource = 47
 )
 
 var (
@@ -443,12 +449,12 @@ func capReadFrame(dev, ctx, frame unsafe.Pointer, size capSize, crop capCrop, op
 	}
 	// GPU readback scales with the source. CPU sampling and allocation scale
 	// only with the configured preview, never a full-size CPU image copy.
-	capCall(ctx, 47, uintptr(*staging), uintptr(texture))
+	capCall(ctx, capCtxCopyResource, uintptr(*staging), uintptr(texture))
 	var mapped capMapped
-	if err := capError("Map capture texture", capCall(ctx, 14, uintptr(*staging), 0, 1, 0, uintptr(unsafe.Pointer(&mapped)))); err != nil {
+	if err := capError("Map capture texture", capCall(ctx, capCtxMap, uintptr(*staging), 0, 1, 0, uintptr(unsafe.Pointer(&mapped)))); err != nil {
 		return nil, err
 	}
-	defer capCall(ctx, 15, uintptr(*staging), 0)
+	defer capCall(ctx, capCtxUnmap, uintptr(*staging), 0)
 	if mapped.Data == nil || uint64(mapped.RowPitch) < uint64(desc.Width)*4 {
 		return nil, fmt.Errorf("capture texture has invalid row pitch")
 	}
