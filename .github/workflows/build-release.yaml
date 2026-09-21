@@ -35,10 +35,12 @@ jobs:
         run: go vet -unsafeptr=false .
 
       - name: Build executable
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: pwsh
         run: .\build.ps1
 
       - name: Package release assets
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: pwsh
         env:
           COMMIT_SHA: ${{ github.sha }}
@@ -51,6 +53,7 @@ jobs:
           if (-not (Test-Path -LiteralPath $zipPath)) { throw 'Zip asset was not created.' }
 
       - name: Upload release assets
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
           name: spencer-clicker-release
