@@ -114,24 +114,11 @@ func enumWindowCallback(hwnd, _ uintptr) uintptr {
 	if a == nil {
 		return 1
 	}
-	visible, _, _ := procIsWindowVisible.Call(hwnd)
-	pid := windowPID(hwnd)
-	if visible == 0 || pid == a.pid {
-		return 1
-	}
-	owner, _, _ := procGetWindow.Call(hwnd, gwOwner)
-	index := int32(gwlExStyle)
-	style, _, _ := procGetWindowLongPtr.Call(hwnd, uintptr(index))
-	if owner != 0 || style&wsExToolWindow != 0 {
-		return 1
-	}
-	title := strings.TrimSpace(windowText(hwnd))
-	if title != "" {
-		a.targets = append(a.targets, targetWindow{hwnd: hwnd, pid: pid, title: title})
+	if target, ok := targetWindowFor(hwnd); ok {
+		a.targets = append(a.targets, target)
 	}
 	return 1
 }
-
 func (a *application) installHooks() error {
 	var err error
 	a.keyboardHook, _, err = procSetWindowsHookEx.Call(whKeyboardLL, keyCallback, a.instance, 0)
@@ -142,7 +129,7 @@ func (a *application) installHooks() error {
 }
 
 func (a *application) syncMouseHook() error {
-	needed := a.capture || a.hotkey.kind == mouseHotkey
+	needed := a.capture || a.picker || a.pickerConsumed || a.hotkey.kind == mouseHotkey
 	if !needed && a.mouseHook != 0 {
 		procUnhookWindowsHookEx.Call(a.mouseHook)
 		a.mouseHook = 0
@@ -181,6 +168,10 @@ func keyboardHookProc(code int32, wparam uintptr, data *kbdLLHookStruct) uintptr
 		}
 		if down && !a.keysDown[data.vkCode] {
 			a.keysDown[data.vkCode] = true
+			if a.picker && data.vkCode == vkEscape {
+				postMessage(a.hwnd, wmAppInput, uintptr(keyboardHotkey), uintptr(data.vkCode))
+				return 1
+			}
 			if a.capture || a.hotkey == (hotkey{keyboardHotkey, data.vkCode}) {
 				postMessage(a.hwnd, wmAppInput, uintptr(keyboardHotkey), uintptr(data.vkCode))
 			}
@@ -189,10 +180,31 @@ func keyboardHookProc(code int32, wparam uintptr, data *kbdLLHookStruct) uintptr
 	r, _, _ := procCallNextHookEx.Call(0, uintptr(code), wparam, uintptr(unsafe.Pointer(data)))
 	return r
 }
-
 func mouseHookProc(code int32, wparam uintptr, data *msLLHookStruct) uintptr {
 	a := activeApp
 	if code == hcAction && a != nil && data != nil {
+		if a.picker && uint32(wparam) == wmMouseMove {
+			var hovered uintptr
+			if target, ok := pickTargetAt(data.pt); ok {
+				hovered = target
+			}
+			if hovered != a.pickerHover {
+				a.pickerHover = hovered
+				postMessage(a.hwnd, wmAppPickHover, hovered, 0)
+			}
+		}
+		if a.picker && uint32(wparam) == wmLButtonDown {
+			if target, ok := pickTargetAt(data.pt); ok {
+				a.pickerConsumed = true
+				postMessage(a.hwnd, wmAppPickTarget, target, 0)
+				return 1
+			}
+		}
+		if uint32(wparam) == wmLButtonUp && a.pickerConsumed {
+			a.pickerConsumed = false
+			postMessage(a.hwnd, wmAppPickReleased, 0, 0)
+			return 1
+		}
 		button, down, up := mouseEvent(uint32(wparam), data.mouseData)
 		if button != 0 {
 			if up {
@@ -209,7 +221,174 @@ func mouseHookProc(code int32, wparam uintptr, data *msLLHookStruct) uintptr {
 	r, _, _ := procCallNextHookEx.Call(0, uintptr(code), wparam, uintptr(unsafe.Pointer(data)))
 	return r
 }
+func windowFromPoint(screen point) uintptr {
+	packed := uintptr(uint32(screen.x)) | uintptr(uint64(uint32(screen.y))<<32)
+	hwnd, _, _ := procWindowFromPoint.Call(packed)
+	return hwnd
+}
 
+func targetWindowFor(hwnd uintptr) (targetWindow, bool) {
+	a := activeApp
+	if a == nil || hwnd == 0 {
+		return targetWindow{}, false
+	}
+	visible, _, _ := procIsWindowVisible.Call(hwnd)
+	pid := windowPID(hwnd)
+	owner, _, _ := procGetWindow.Call(hwnd, gwOwner)
+	index := int32(gwlExStyle)
+	style, _, _ := procGetWindowLongPtr.Call(hwnd, uintptr(index))
+	title := strings.TrimSpace(windowText(hwnd))
+	if visible == 0 || pid == 0 || pid == a.pid || owner != 0 || style&wsExToolWindow != 0 || title == "" {
+		return targetWindow{}, false
+	}
+	return targetWindow{hwnd: hwnd, pid: pid, title: title}, true
+}
+
+func pickTargetAt(screen point) (uintptr, bool) {
+	hwnd := windowFromPoint(screen)
+	if hwnd == 0 {
+		return 0, false
+	}
+	root, _, _ := procGetAncestor.Call(hwnd, gaRoot)
+	if root == 0 {
+		return 0, false
+	}
+	if target, ok := targetWindowFor(root); ok {
+		return target.hwnd, true
+	}
+	return 0, false
+}
+
+func (a *application) targetIndex(target targetWindow) int {
+	for i, candidate := range a.targets {
+		if candidate.hwnd == target.hwnd && candidate.pid == target.pid {
+			return i
+		}
+	}
+	return -1
+}
+
+func (a *application) selectComboTarget(target targetWindow) {
+	index := a.targetIndex(target)
+	selection := ^uintptr(0)
+	if index >= 0 {
+		selection = uintptr(index)
+	}
+	sendMessage(a.processCombo, cbSetCurSel, selection, 0)
+}
+
+func (a *application) clearPickerHighlight() {
+	if a.pickerHighlighted != 0 {
+		color := uint32(dwmColorDefault)
+		if a.pickerOriginalBorderValid {
+			color = uint32(a.pickerOriginalBorder)
+		}
+		procDwmSetWindowAttribute.Call(a.pickerHighlighted, dwmwaBorderColor, uintptr(unsafe.Pointer(&color)), unsafe.Sizeof(color))
+	}
+	a.pickerHighlighted = 0
+	a.pickerOriginalBorder = 0
+	a.pickerOriginalBorderValid = false
+}
+
+func (a *application) updatePickerHighlight(hwnd uintptr) {
+	if a.pickerHighlighted == hwnd {
+		return
+	}
+	a.clearPickerHighlight()
+	if hwnd == 0 {
+		return
+	}
+	var original uint32
+	if result, _, _ := procDwmGetWindowAttribute.Call(hwnd, dwmwaBorderColor, uintptr(unsafe.Pointer(&original)), unsafe.Sizeof(original)); result == 0 {
+		a.pickerOriginalBorder = uintptr(original)
+		a.pickerOriginalBorderValid = true
+	}
+	color := uint32(rgb(64, 139, 255))
+	procDwmSetWindowAttribute.Call(hwnd, dwmwaBorderColor, uintptr(unsafe.Pointer(&color)), unsafe.Sizeof(color))
+	a.pickerHighlighted = hwnd
+}
+
+func (a *application) clearPickerPreview() {
+	a.clearPickerHighlight()
+	a.pickerHover = 0
+	a.pickerPreview = targetWindow{}
+	a.selectComboTarget(a.selected)
+	if a.processCombo != 0 {
+		procInvalidateRect.Call(a.processCombo, 0, 1)
+	}
+}
+
+func (a *application) updatePickerPreview(hwnd uintptr) {
+	if !a.picker {
+		return
+	}
+	target, ok := targetWindowFor(hwnd)
+	if ok {
+		index := a.targetIndex(target)
+		if index < 0 {
+			a.refreshTargets()
+			index = a.targetIndex(target)
+		}
+		if index >= 0 {
+			a.pickerPreview = target
+			sendMessage(a.processCombo, cbSetCurSel, uintptr(index), 0)
+			a.updatePickerHighlight(target.hwnd)
+			if a.processCombo != 0 {
+				procInvalidateRect.Call(a.processCombo, 0, 1)
+			}
+			return
+		}
+	}
+	a.pickerPreview = targetWindow{}
+	a.selectComboTarget(a.selected)
+	a.updatePickerHighlight(0)
+	if a.processCombo != 0 {
+		procInvalidateRect.Call(a.processCombo, 0, 1)
+	}
+}
+func (a *application) togglePicker() {
+	if a.clicker.running || a.clicker.pressed {
+		return
+	}
+	if a.picker {
+		a.cancelPicker()
+		return
+	}
+	a.capture = false
+	a.refreshTargets()
+	a.clearPickerPreview()
+	a.picker, a.pickerConsumed = true, false
+	a.setStatus("Click a target window. Escape or Pick target to cancel.", false)
+	a.updateControls()
+}
+func (a *application) cancelPicker() {
+	a.clearPickerPreview()
+	a.picker = false
+	a.setStatus("Target picker cancelled.", false)
+	a.updateControls()
+}
+func (a *application) selectPickedTarget(hwnd uintptr) {
+	if !a.picker || hwnd == 0 || hwnd == a.hwnd || !isWindow(hwnd) {
+		return
+	}
+	target, ok := targetWindowFor(hwnd)
+	if !ok {
+		return
+	}
+	a.clearPickerPreview()
+	a.selected = target
+	a.picker = false
+	a.refreshTargets()
+	for i, candidate := range a.targets {
+		if candidate.hwnd == target.hwnd && candidate.pid == target.pid {
+			sendMessage(a.processCombo, cbSetCurSel, uintptr(i), 0)
+			break
+		}
+	}
+	a.setStatus("Ready. "+a.hotkey.name()+" to start clicking.", false)
+	a.restartPIP()
+	a.updateControls()
+}
 func mouseEvent(message, data uint32) (button uint32, down, up bool) {
 	switch message {
 	case wmRButtonDown, wmRButtonUp:

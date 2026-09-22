@@ -201,6 +201,105 @@ func TestInteractiveTarget(t *testing.T) {
 	}
 }
 
+func TestPickerWindowResolution(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	hwnd := makeFixture(t, true)
+	pumpFor(20 * time.Millisecond)
+
+	a := newApplication()
+	a.pid = windowPID(hwnd) + 1
+	activeApp = a
+	t.Cleanup(func() { activeApp = nil })
+
+	var bounds rect
+	procGetWindowRect.Call(fixture.label, uintptr(unsafe.Pointer(&bounds)))
+	screen := point{(bounds.left + bounds.right) / 2, (bounds.top + bounds.bottom) / 2}
+	root := windowFromPoint(screen)
+	ancestor, _, _ := procGetAncestor.Call(root, gaRoot)
+	if ancestor != hwnd {
+		t.Fatalf("child point resolved to %x, want root %x", ancestor, hwnd)
+	}
+	picked, ok := pickTargetAt(screen)
+	if !ok || picked != hwnd {
+		t.Fatalf("pickTargetAt = %x, %t; want %x, true", picked, ok, hwnd)
+	}
+	target, ok := targetWindowFor(hwnd)
+	if !ok || target.pid != windowPID(hwnd) || target.title == "" {
+		t.Fatalf("targetWindowFor = %+v, %t", target, ok)
+	}
+
+	a.pid = windowPID(hwnd)
+	if _, ok := targetWindowFor(hwnd); ok {
+		t.Fatal("targetWindowFor accepted a window from the current process")
+	}
+}
+
+func TestPickerConsumesValidSelectionClick(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	hwnd := makeFixture(t, true)
+	pumpFor(20 * time.Millisecond)
+
+	a := newApplication()
+	a.pid = windowPID(hwnd) + 1
+	a.picker = true
+	activeApp = a
+	t.Cleanup(func() { activeApp = nil })
+
+	var bounds rect
+	procGetWindowRect.Call(fixture.label, uintptr(unsafe.Pointer(&bounds)))
+	data := &msLLHookStruct{pt: point{(bounds.left + bounds.right) / 2, (bounds.top + bounds.bottom) / 2}}
+	if got := mouseHookProc(hcAction, wmLButtonDown, data); got != 1 || !a.pickerConsumed {
+		t.Fatalf("picker mouse-down result = %d, consumed = %t; want 1, true", got, a.pickerConsumed)
+	}
+	picked, ok := pickTargetAt(data.pt)
+	if !ok {
+		t.Fatal("pickTargetAt rejected the fixture after mouse-down")
+	}
+	mainWindowProc(a.hwnd, wmAppPickTarget, picked, 0)
+	if a.picker || !a.pickerConsumed || a.selected.hwnd != hwnd {
+		t.Fatalf("selection dispatch state = picker %t, consumed %t, selected %+v", a.picker, a.pickerConsumed, a.selected)
+	}
+	if got := mouseHookProc(hcAction, wmLButtonUp, data); got != 1 || a.pickerConsumed {
+		t.Fatalf("picker mouse-up result = %d, consumed = %t; want 1, false", got, a.pickerConsumed)
+	}
+	mainWindowProc(a.hwnd, wmAppPickReleased, 0, 0)
+}
+func TestPickerStateAndSelection(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	hwnd := makeFixture(t, true)
+	pumpFor(20 * time.Millisecond)
+	a := newApplication()
+	a.pid = windowPID(hwnd) + 1
+	a.picker = true
+	activeApp = a
+	t.Cleanup(func() { activeApp = nil })
+
+	a.toggle()
+	if a.picker {
+		t.Fatal("starting the clicker did not disarm the picker")
+	}
+	a.picker = true
+	a.selectPickedTarget(hwnd)
+	if a.picker || a.selected.hwnd != hwnd || a.selected.pid != windowPID(hwnd) {
+		t.Fatalf("picked target state = picker %t, selected %+v", a.picker, a.selected)
+	}
+
+	previous := a.selected
+	a.picker = true
+	a.cancelPicker()
+	if a.picker || a.selected != previous {
+		t.Fatalf("cancel changed target state: picker %t, selected %+v", a.picker, a.selected)
+	}
+
+	a.picker = true
+	a.togglePicker()
+	if a.picker {
+		t.Fatal("picker button did not cancel an armed picker")
+	}
+}
 func TestApplicationLifecycle(t *testing.T) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()

@@ -8,14 +8,14 @@ network requests, or background services.
 
 Open **`dist/spencer-clicker.exe`** on Windows 10/11 x64.
 
-1. Open the target-window dropdown and select an application. Opening the list refreshes it.
+1. Open the target-window dropdown and select an application. Opening the list refreshes it. You can also click the magnifying-glass button beside the dropdown, then click any visible top-level application window to choose it directly. Press Escape or click the picker button again to cancel; clicks on Spencer Clicker and invalid windows pass through normally.
 2. Set the click interval, or turn on **Hold left click**.
 3. Click **Start clicker** or press **F9** anywhere. Press again to stop.
 4. Click the hotkey button to bind any single keyboard key, right/middle mouse,
    Mouse 4, or Mouse 5. Click the hotkey button again to cancel binding.
    Left mouse is reserved for normal UI interaction. Held keys do not repeatedly toggle.
 
-The status icon is docked in the **Windows system tray beside the clock**: green
+The status is docked in the **Windows system tray beside the clock**: green
 while clicking/holding, gray while idle. Hover for the current state and hotkey.
 There is no permanent floating status overlay. Windows may initially put it in the tray's hidden
 icons menu; use the taskbar's overflow arrow to find it and drag it beside the
@@ -102,14 +102,15 @@ Requires Go 1.25 or newer on Windows x64. From this directory:
 ```powershell
 .\build.ps1
 # Equivalent:
-go build -buildvcs=false -trimpath -ldflags '-s -w -H=windowsgui' -o dist/spencer-clicker.exe .
+go build -buildvcs=false -trimpath -ldflags '-s -w -H=windowsgui' -o dist/spencer-clicker.exe ./cmd/spencer-clicker
 ```
 
-The included `resource_windows_amd64.syso` embeds `app.ico` as the executable's
-Windows icon and includes the manifest for DPI awareness, Windows compatibility,
+The included `cmd/spencer-clicker/resource_windows_amd64.syso` embeds
+`cmd/spencer-clicker/app.ico` as the executable's Windows icon and includes
+the manifest for DPI awareness, Windows compatibility, standard privileges, and
 standard privileges, and native control styles. Explorer and the taskbar therefore
 show the Spencer Clicker artwork instead of Go's generic application icon. If editing
-`app.manifest`, regenerate it with MinGW's resource compiler before rebuilding:
+`cmd/spencer-clicker/app.manifest`, regenerate it with MinGW's resource compiler before rebuilding:
 
 ```powershell
 .\build.ps1 -RegenerateResources
@@ -135,8 +136,8 @@ publishes only when dispatched from `main`.
 ## Verification
 
 ```powershell
-go test -count=1 -v .
-go vet -unsafeptr=false .
+go test -count=1 -v ./...
+go vet -unsafeptr=false ./...
 ```
 
 Tests cover cadence, balanced down/up events, hold mode, rapid restart,
@@ -154,7 +155,7 @@ verify the real gray/green notification-area icon.
 For a harmless window to test manually:
 
 ```powershell
-go test -run TestInteractiveTarget -timeout 30m -args -interactive-target
+go test ./cmd/spencer-clicker -run TestInteractiveTarget -timeout 30m -args -interactive-target
 ```
 
 Select **Spencer Clicker - Test target** in the app. The receiver displays mouse-down,
@@ -162,11 +163,16 @@ mouse-up, held state, and coordinates. Close the receiver to finish that test.
 
 ## Code map
 
+Go application code and Windows resources live in `cmd/spencer-clicker/`:
+
 - `engine.go`: small, synchronous click/hold state machine with testable I/O.
 - `app_windows.go`: window lifecycle, settings, and UI events.
 - `native_windows.go`: target discovery, timers, and global input hooks.
 - `ui_windows.go`: painting, fonts, and icon artwork.
 - `tray_windows.go`: native notification-area icon, status, and tray menu.
+
+The repository root keeps the Go module, build/release scripts, documentation,
+and shared assets; executable output remains in `dist/` and at the root.
 - `pip_windows.go`: optional draggable preview, settings, and UI lifecycle.
 - `capture_windows.go`: rate-limited Windows Graphics Capture worker and scaling.
 - `win32_windows.go`: Win32 declarations; standard library only.

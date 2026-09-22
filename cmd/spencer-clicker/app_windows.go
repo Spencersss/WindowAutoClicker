@@ -9,6 +9,7 @@ import (
 
 const (
 	idProcess = 1001 + iota
+	idPicker
 	idInterval
 	idHold
 	idHotkey
@@ -20,32 +21,38 @@ const (
 
 const healthTimerID = 0x7FFFFFFF
 
+const targetComboItemHeight int32 = 32
+const targetControlHeight = targetComboItemHeight + 2
+
 var activeApp *application
 
 type application struct {
-	scroll                                                             int32
-	layingOut                                                          bool
-	instance, hwnd, icon                                               uintptr
-	tray                                                               trayIcon
-	taskbarCreated                                                     uint32
-	pid                                                                uint32
-	dpi                                                                int32
-	font, smallFont, titleFont                                         uintptr
-	bgBrush, fieldBrush                                                uintptr
-	processCombo, intervalEdit, holdButton, hotkeyButton, toggleButton uintptr
-	keyboardHook, mouseHook                                            uintptr
-	keysDown                                                           [256]bool
-	mouseDown                                                          [5]bool
-	hotkey                                                             hotkey
-	hold, capture                                                      bool
-	status                                                             string
-	statusError                                                        bool
-	targets                                                            []targetWindow
-	selected                                                           targetWindow
-	driver                                                             nativeDriver
-	clicker                                                            clicker
-	pip                                                                pictureInPicture
-	pipButton, pipSizeCombo, pipFPSCombo                               uintptr
+	scroll                                                                           int32
+	layingOut                                                                        bool
+	instance, hwnd, icon                                                             uintptr
+	tray                                                                             trayIcon
+	taskbarCreated                                                                   uint32
+	pid                                                                              uint32
+	dpi                                                                              int32
+	font, smallFont, titleFont                                                       uintptr
+	bgBrush, fieldBrush                                                              uintptr
+	processCombo, pickerButton, intervalEdit, holdButton, hotkeyButton, toggleButton uintptr
+	keyboardHook, mouseHook                                                          uintptr
+	keysDown                                                                         [256]bool
+	mouseDown                                                                        [5]bool
+	hotkey                                                                           hotkey
+	hold, capture, picker, pickerConsumed                                            bool
+	pickerHover, pickerHighlighted, pickerOriginalBorder                             uintptr
+	pickerOriginalBorderValid                                                        bool
+	pickerPreview                                                                    targetWindow
+	status                                                                           string
+	statusError                                                                      bool
+	targets                                                                          []targetWindow
+	selected                                                                         targetWindow
+	driver                                                                           nativeDriver
+	clicker                                                                          clicker
+	pip                                                                              pictureInPicture
+	pipButton, pipSizeCombo, pipFPSCombo                                             uintptr
 }
 
 func newApplication() *application {
@@ -174,6 +181,7 @@ func (a *application) createControls(hwnd uintptr) {
 		return createWindow(0, class, text, wsChild|wsVisible|wsTabStop|style, 0, 0, 1, 1, hwnd, id, a.instance)
 	}
 	a.processCombo = create("COMBOBOX", "Target window", wsVScroll|cbsDropdownList|cbsOwnerDrawFixed|cbsHasStrings, idProcess)
+	a.pickerButton = create("BUTTON", "Pick target", bsOwnerDraw, idPicker)
 	a.intervalEdit = create("EDIT", "50", esNumber|esAutoHScroll, idInterval)
 	sendMessage(a.intervalEdit, emSetLimitText, 10, 0)
 	a.holdButton = create("BUTTON", "Hold left click: Off", bsOwnerDraw, idHold)
@@ -215,7 +223,8 @@ func (a *application) layout() {
 	move := func(hwnd uintptr, x, y, width, height int32) {
 		procMoveWindow.Call(hwnd, uintptr(a.s(x)), uintptr(a.s(y-a.scroll)), uintptr(a.s(width)), uintptr(a.s(height)), 1)
 	}
-	move(a.processCombo, 28, 134, w-56, 300)
+	move(a.processCombo, 28, 134, w-106, 300)
+	move(a.pickerButton, w-70, 134, 42, targetControlHeight)
 	move(a.intervalEdit, w-174, 243, 112, 26)
 	move(a.holdButton, w-158, 305, 130, 42)
 	move(a.hotkeyButton, w-218, 381, 190, 42)
@@ -235,6 +244,8 @@ func (a *application) updateControls() {
 	if a.keyboardHook != 0 {
 		if err := a.syncMouseHook(); err != nil {
 			a.capture = false
+			a.picker = false
+			a.pickerConsumed = false
 			a.setStatus(err.Error(), true)
 		}
 	}
@@ -248,7 +259,7 @@ func (a *application) updateControls() {
 	} else {
 		procKillTimer.Call(a.hwnd, healthTimerID)
 	}
-	for _, hwnd := range []uintptr{a.processCombo, a.intervalEdit, a.holdButton, a.hotkeyButton} {
+	for _, hwnd := range []uintptr{a.processCombo, a.pickerButton, a.intervalEdit, a.holdButton, a.hotkeyButton} {
 		enabled := uintptr(1)
 		if running {
 			enabled = 0
@@ -265,12 +276,17 @@ func (a *application) updateControls() {
 		key = "Press a key..."
 	}
 	setWindowText(a.hotkeyButton, key)
+	if a.picker {
+		setWindowText(a.pickerButton, "Cancel target picker")
+	} else {
+		setWindowText(a.pickerButton, "Pick target")
+	}
 	action := "Start clicker"
 	if running {
 		action = "Stop clicker"
 	}
 	setWindowText(a.toggleButton, action+" ["+a.hotkey.name()+"]")
-	for _, hwnd := range []uintptr{a.holdButton, a.hotkeyButton, a.toggleButton, a.hwnd} {
+	for _, hwnd := range []uintptr{a.pickerButton, a.holdButton, a.hotkeyButton, a.toggleButton, a.hwnd} {
 		if hwnd != 0 {
 			procInvalidateRect.Call(hwnd, 0, 1)
 		}
@@ -298,6 +314,11 @@ func parseInterval(text string) (int, error) {
 
 func (a *application) toggle() {
 	a.capture = false
+	if a.picker || a.pickerHighlighted != 0 {
+		a.clearPickerPreview()
+	}
+	a.picker = false
+	a.picker = false
 	defer a.updateControls()
 	if a.clicker.running || a.clicker.pressed {
 		if err := a.clicker.stop(); err != nil {
@@ -346,10 +367,19 @@ func (a *application) handleCommand(id, notification uint16) {
 		if notification == cbnSelChange {
 			index := int32(sendMessage(a.processCombo, cbGetCurSel, 0, 0))
 			if index >= 0 && int(index) < len(a.targets) {
+				if a.picker {
+					a.clearPickerPreview()
+				}
+				a.picker = false
 				a.selected = a.targets[index]
 				a.setStatus("Ready. "+a.hotkey.name()+" to start clicking.", false)
 				a.restartPIP()
+				a.updateControls()
 			}
+		}
+	case idPicker:
+		if notification == bnClicked && !a.clicker.running {
+			a.togglePicker()
 		}
 	case idHold:
 		if notification == bnClicked && !a.clicker.running {
@@ -358,6 +388,10 @@ func (a *application) handleCommand(id, notification uint16) {
 		}
 	case idHotkey:
 		if notification == bnClicked && !a.clicker.running {
+			if a.picker {
+				a.clearPickerPreview()
+			}
+			a.picker = false
 			a.capture = !a.capture
 			if a.capture {
 				a.setStatus("Press a key or mouse button. Click again to cancel.", false)
@@ -428,6 +462,12 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 		return 0
 	case wmAppInput:
 		next := hotkey{hotkeyKind(wparam), uint32(lparam)}
+		if a.picker {
+			if next.kind == keyboardHotkey && next.code == vkEscape {
+				a.cancelPicker()
+			}
+			return 0
+		}
 		if a.capture {
 			a.hotkey, a.capture = next, false
 			a.setStatus("Hotkey set to "+next.name()+".", false)
@@ -435,6 +475,15 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 		} else if next == a.hotkey {
 			a.toggle()
 		}
+		return 0
+	case wmAppPickTarget:
+		a.selectPickedTarget(wparam)
+		return 0
+	case wmAppPickReleased:
+		a.updateControls()
+		return 0
+	case wmAppPickHover:
+		a.updatePickerPreview(wparam)
 		return 0
 	case wmTimer:
 		if wparam == pipTimerID {
@@ -458,7 +507,7 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 		return 0
 	case wmMeasureItem:
 		item := (*measureItemStruct)(unsafe.Pointer(lparam))
-		item.itemHeight = uint32(a.s(34))
+		item.itemHeight = uint32(a.s(targetControlHeight))
 		return 1
 	case wmDrawItem:
 		a.drawItem((*drawItemStruct)(unsafe.Pointer(lparam)))
