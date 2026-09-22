@@ -28,12 +28,10 @@ jobs:
         shell: pwsh
         env:
           SPENCER_CLICKER_SKIP_SHELL_TEST: '1'
-        run: go test -count=1 -v .
-
+        run: go test -count=1 -v ./...
       - name: Run vet
         shell: pwsh
-        run: go vet -unsafeptr=false .
-
+        run: go vet -unsafeptr=false ./...
       - name: Build executable
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: pwsh

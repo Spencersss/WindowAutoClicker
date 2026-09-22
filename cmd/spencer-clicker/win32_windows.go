@@ -30,6 +30,7 @@ const (
 	wmKeyUp           = 0x0101
 	wmSysKeyDown      = 0x0104
 	wmSysKeyUp        = 0x0105
+	wmMouseMove       = 0x0200
 	wmLButtonDown     = 0x0201
 	wmLButtonUp       = 0x0202
 	wmRButtonDown     = 0x0204
@@ -51,6 +52,9 @@ const (
 	wmEndSession      = 0x0016
 	wmPowerBroadcast  = 0x0218
 	wmAppInput        = 0x8003
+	wmAppPickTarget   = 0x8005
+	wmAppPickReleased = 0x8006
+	wmAppPickHover    = 0x8007
 )
 
 const (
@@ -108,6 +112,7 @@ const (
 	swShowNoActivate = 4
 
 	gwOwner    = 4
+	gaRoot     = 2
 	gwlExStyle = -20
 
 	colorWindow = 5
@@ -134,7 +139,9 @@ const (
 
 	spiGetWorkArea = 0x0030
 
-	mbIconError = 0x00000010
+	mbIconError      = 0x00000010
+	dwmwaBorderColor = 34
+	dwmColorDefault  = 0xFFFFFFFF
 )
 
 const (
@@ -223,6 +230,8 @@ var (
 	procIsWindowVisible               = user32.NewProc("IsWindowVisible")
 	procIsWindow                      = user32.NewProc("IsWindow")
 	procGetWindow                     = user32.NewProc("GetWindow")
+	procWindowFromPoint               = user32.NewProc("WindowFromPoint")
+	procGetAncestor                   = user32.NewProc("GetAncestor")
 	procGetWindowLongPtr              = user32.NewProc("GetWindowLongPtrW")
 	procGetClientRect                 = user32.NewProc("GetClientRect")
 	procGetClientRectRaw              = procGetClientRect
@@ -234,6 +243,8 @@ var (
 	procSetFocus                      = user32.NewProc("SetFocus")
 	procGetFocus                      = user32.NewProc("GetFocus")
 	procDrawFocusRect                 = user32.NewProc("DrawFocusRect")
+	procMoveToEx                      = gdi32.NewProc("MoveToEx")
+	procLineTo                        = gdi32.NewProc("LineTo")
 	procCreateIcon                    = user32.NewProc("CreateIcon")
 	procDestroyIcon                   = user32.NewProc("DestroyIcon")
 	procSetProcessDpiAwarenessContext = user32.NewProc("SetProcessDpiAwarenessContext")
@@ -273,6 +284,7 @@ var (
 	procGetDpiForSystem               = user32.NewProc("GetDpiForSystem")
 	procSetWindowTheme                = uxtheme.NewProc("SetWindowTheme")
 	procDwmSetWindowAttribute         = dwmapi.NewProc("DwmSetWindowAttribute")
+	procDwmGetWindowAttribute         = dwmapi.NewProc("DwmGetWindowAttribute")
 )
 
 type point struct{ x, y int32 }

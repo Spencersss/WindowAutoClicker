@@ -30,13 +30,13 @@ func (a *application) makeFonts() {
 }
 
 func (a *application) applyFonts() {
-	for _, hwnd := range []uintptr{a.processCombo, a.intervalEdit, a.holdButton, a.hotkeyButton, a.toggleButton, a.pipButton, a.pipSizeCombo, a.pipFPSCombo} {
+	for _, hwnd := range []uintptr{a.processCombo, a.pickerButton, a.intervalEdit, a.holdButton, a.hotkeyButton, a.toggleButton, a.pipButton, a.pipSizeCombo, a.pipFPSCombo} {
 		if hwnd != 0 {
 			sendMessage(hwnd, wmSetFont, a.font, 1)
 		}
 	}
 	sendMessage(a.processCombo, cbSetItemHeight, ^uintptr(0), uintptr(a.s(34)))
-	sendMessage(a.processCombo, cbSetItemHeight, 0, uintptr(a.s(32)))
+	sendMessage(a.processCombo, cbSetItemHeight, 0, uintptr(a.s(targetComboItemHeight)))
 	for _, hwnd := range []uintptr{a.pipSizeCombo, a.pipFPSCombo} {
 		if hwnd != 0 {
 			sendMessage(hwnd, cbSetItemHeight, ^uintptr(0), uintptr(a.s(32)))
@@ -134,6 +134,50 @@ func (a *application) paintMain(hwnd uintptr) {
 	a.text(hdc, "LEFT BUTTON  /  BACKGROUND", a.box(158, h-36, w-186, 22), a.smallFont, colorMuted, 2)
 }
 
+func drawWindowSelector(hdc uintptr, bounds rect, color uintptr) {
+	// Draw the lens and handle in a square viewport to keep the icon centered
+	// and unstretched at every DPI.
+	size := min(bounds.right-bounds.left, bounds.bottom-bounds.top)
+	if size <= 0 {
+		return
+	}
+	const view = int32(48)
+	left := bounds.left + ((bounds.right-bounds.left)-size)/2
+	top := bounds.top + ((bounds.bottom-bounds.top)-size)/2
+	scale := func(v int32) int32 { return v * size / view }
+	x := func(v int32) int32 { return left + scale(v) }
+	y := func(v int32) int32 { return top + scale(v) }
+	brush, _, _ := procCreateSolidBrush.Call(color)
+	pen, _, _ := procCreatePen.Call(0, 1, color)
+	oldBrush, _, _ := procSelectObject.Call(hdc, brush)
+	oldPen, _, _ := procSelectObject.Call(hdc, pen)
+	handlePen, _, _ := procCreatePen.Call(0, uintptr(max(1, scale(4))), color)
+	oldHandlePen, _, _ := procSelectObject.Call(hdc, handlePen)
+	procMoveToEx.Call(hdc, uintptr(x(29)), uintptr(y(29)), 0)
+	procLineTo.Call(hdc, uintptr(x(41)), uintptr(y(41)))
+	procSelectObject.Call(hdc, oldHandlePen)
+	procDeleteObject.Call(handlePen)
+	outer := rect{x(6), y(6), x(35), y(35)}
+	procEllipse.Call(hdc, uintptr(outer.left), uintptr(outer.top), uintptr(outer.right), uintptr(outer.bottom))
+	procSelectObject.Call(hdc, oldPen)
+	procSelectObject.Call(hdc, oldBrush)
+	procDeleteObject.Call(pen)
+	procDeleteObject.Call(brush)
+	background := colorField
+	if a := activeApp; a != nil && a.picker {
+		background = rgb(32, 66, 49)
+	}
+	hole, _, _ := procCreateSolidBrush.Call(background)
+	holePen, _, _ := procCreatePen.Call(0, 1, background)
+	oldBrush, _, _ = procSelectObject.Call(hdc, hole)
+	oldPen, _, _ = procSelectObject.Call(hdc, holePen)
+	inner := rect{x(10), y(10), x(31), y(31)}
+	procEllipse.Call(hdc, uintptr(inner.left), uintptr(inner.top), uintptr(inner.right), uintptr(inner.bottom))
+	procSelectObject.Call(hdc, oldPen)
+	procSelectObject.Call(hdc, oldBrush)
+	procDeleteObject.Call(holePen)
+	procDeleteObject.Call(hole)
+}
 func (a *application) drawItem(item *drawItemStruct) {
 	if item.ctlID == idPIPSize || item.ctlID == idPIPFPS {
 		text := ""
@@ -151,6 +195,37 @@ func (a *application) drawItem(item *drawItemStruct) {
 		box := item.rcItem
 		box.left += a.s(8)
 		a.text(item.hdc, text, box, a.font, colorText, dtLeft)
+		return
+	}
+	if item.ctlID == idPicker {
+		background, foreground, border := colorField, colorText, colorBorder
+		if a.picker {
+			background, foreground, border = rgb(32, 66, 49), colorGreen, colorGreen
+		}
+		if item.itemState&odsDisabled != 0 {
+			foreground = colorMuted
+		}
+		if item.itemState&odsSelected != 0 {
+			border = colorText
+		}
+		fill(item.hdc, item.rcItem, colorBG)
+		roundBox(item.hdc, item.rcItem, background, border, a.s(8))
+		iconBox := item.rcItem
+		iconSize := min(item.rcItem.right-item.rcItem.left, item.rcItem.bottom-item.rcItem.top)
+		iconSize = max(a.s(18), iconSize-a.s(8))
+		iconBox.left = (item.rcItem.left + item.rcItem.right - iconSize) / 2
+		iconBox.top = (item.rcItem.top + item.rcItem.bottom - iconSize) / 2
+		iconBox.right = iconBox.left + iconSize
+		iconBox.bottom = iconBox.top + iconSize
+		drawWindowSelector(item.hdc, iconBox, foreground)
+		if item.itemState&odsFocus != 0 {
+			box := item.rcItem
+			box.left += a.s(4)
+			box.right -= a.s(4)
+			box.top += a.s(4)
+			box.bottom -= a.s(4)
+			procDrawFocusRect.Call(item.hdc, uintptr(unsafe.Pointer(&box)))
+		}
 		return
 	}
 	if item.ctlID == idProcess {
