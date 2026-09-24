@@ -18,6 +18,8 @@ const (
 	idPIP
 	idPIPSize
 	idPIPFPS
+	idClickerSettings
+	idPIPSettings
 )
 
 const healthTimerID = 0x7FFFFFFF
@@ -38,6 +40,8 @@ type application struct {
 	font, smallFont, titleFont                                                                         uintptr
 	bgBrush, fieldBrush                                                                                uintptr
 	processCombo, pickerButton, clickPointButton, intervalEdit, holdButton, hotkeyButton, toggleButton uintptr
+	clickerSettingsButton, pipSettingsButton                                                           uintptr
+	clickerSettingsExpanded, pipSettingsExpanded                                                       bool
 	keyboardHook, mouseHook                                                                            uintptr
 	keysDown                                                                                           [256]bool
 	mouseDown                                                                                          [5]bool
@@ -195,11 +199,13 @@ func (a *application) createControls(hwnd uintptr) {
 	a.processCombo = create("COMBOBOX", "Target window", wsVScroll|cbsDropdownList|cbsOwnerDrawFixed|cbsHasStrings, idProcess)
 	a.pickerButton = create("BUTTON", "Pick target", bsOwnerDraw, idPicker)
 	a.clickPointButton = create("BUTTON", "Choose Click", bsOwnerDraw, idClickPoint)
+	a.toggleButton = create("BUTTON", "Start clicker [F9]", bsOwnerDraw, idToggle)
+	a.clickerSettingsButton = create("BUTTON", "Clicker settings", bsOwnerDraw, idClickerSettings)
 	a.intervalEdit = create("EDIT", "50", esNumber|esAutoHScroll, idInterval)
 	sendMessage(a.intervalEdit, emSetLimitText, 10, 0)
 	a.holdButton = create("BUTTON", "Hold left click: Off", bsOwnerDraw, idHold)
 	a.hotkeyButton = create("BUTTON", "Hotkey: F9", bsOwnerDraw, idHotkey)
-	a.toggleButton = create("BUTTON", "Start clicker [F9]", bsOwnerDraw, idToggle)
+	a.pipSettingsButton = create("BUTTON", "Picture-in-picture settings", bsOwnerDraw, idPIPSettings)
 	a.pipButton = create("BUTTON", "Picture-in-picture: Off", bsOwnerDraw, idPIP)
 	a.pipSizeCombo = create("COMBOBOX", "Preview resolution", cbsDropdownList|cbsOwnerDrawFixed|cbsHasStrings, idPIPSize)
 	a.pipFPSCombo = create("COMBOBOX", "Preview refresh rate", cbsDropdownList|cbsOwnerDrawFixed|cbsHasStrings, idPIPFPS)
@@ -211,6 +217,7 @@ func (a *application) createControls(hwnd uintptr) {
 	}
 	sendMessage(a.pipSizeCombo, cbSetCurSel, 1, 0)
 	sendMessage(a.pipFPSCombo, cbSetCurSel, 2, 0)
+	a.updateSettingsHeaders()
 	a.applyFonts()
 	a.layout()
 	dark := int32(1)
@@ -227,27 +234,119 @@ func (a *application) layout() {
 	defer func() { a.layingOut = false }()
 	var bounds rect
 	getClientRect(a.hwnd, &bounds)
-	page := bounds.bottom * 96 / a.dpi
-	a.scroll = clampScroll(a.scroll, page)
-	info := scrollInfo{size: uint32(unsafe.Sizeof(scrollInfo{})), mask: 1 | 2 | 4, max: mainContentHeight - 1, page: uint32(max(1, page)), pos: a.scroll}
+	page := a.settingsViewportPage()
+	contentHeight := a.settingsContentHeight()
+	a.scroll = clampScroll(a.scroll, page, contentHeight)
+	info := scrollInfo{size: uint32(unsafe.Sizeof(scrollInfo{})), mask: 1 | 2 | 4, max: max(0, contentHeight-1), page: uint32(max(1, page)), pos: a.scroll}
 	procSetScrollInfo.Call(a.hwnd, 1, uintptr(unsafe.Pointer(&info)), 1)
 	getClientRect(a.hwnd, &bounds)
-	w, h := bounds.right*96/a.dpi, max(mainContentHeight, page)
+	w := bounds.right * 96 / a.dpi
 	move := func(hwnd uintptr, x, y, width, height int32) {
-		procMoveWindow.Call(hwnd, uintptr(a.s(x)), uintptr(a.s(y-a.scroll)), uintptr(a.s(width)), uintptr(a.s(height)), 1)
+		procMoveWindow.Call(hwnd, uintptr(a.s(x)), uintptr(a.s(y)), uintptr(a.s(width)), uintptr(a.s(height)), 1)
 	}
+	moveSettings := func(hwnd uintptr, x, y, width, height int32) {
+		screenY := y - a.scroll
+		if screenY < settingsTop {
+			screenY = -height - 1
+		}
+		move(hwnd, x, screenY, width, height)
+	}
+
+	// The essentials remain anchored to the window while only the settings
+	// cards move with the vertical scrollbar.
 	move(a.processCombo, 28, 134, w-106, 300)
 	move(a.pickerButton, w-70, 134, 42, targetControlHeight)
-	move(a.clickPointButton, w-184, 177, 156, 36)
-	move(a.intervalEdit, w-174, 267, 112, 26)
-	move(a.holdButton, w-158, 329, 130, 42)
-	move(a.hotkeyButton, w-218, 405, 190, 42)
-	move(a.pipButton, w-158, 485, 130, 42)
-	move(a.pipSizeCombo, 28, 575, 230, 220)
-	move(a.pipFPSCombo, w-198, 575, 170, 240)
-	move(a.toggleButton, 28, h-100, w-56, 48)
+	move(a.clickPointButton, 28, 177, 156, 36)
+	move(a.toggleButton, 28, 244, w-56, 44)
+
+	clickerTop := settingsTop
+	pipTop := clickerTop + clickerSettingsHeight(a.clickerSettingsExpanded) + settingsSectionGap
+	moveSettings(a.clickerSettingsButton, 28, clickerTop, w-56, settingsSectionHeaderHeight)
+	moveSettings(a.pipSettingsButton, 28, pipTop, w-56, settingsSectionHeaderHeight)
+	moveSettings(a.intervalEdit, w-174, clickerTop+52, 146, 36)
+	moveSettings(a.holdButton, w-158, clickerTop+98, 130, 36)
+	moveSettings(a.hotkeyButton, w-158, clickerTop+144, 130, 36)
+	moveSettings(a.pipButton, w-158, pipTop+52, 130, 36)
+	columnWidth := (w - 68) / 2
+	moveSettings(a.pipSizeCombo, 28, pipTop+120, columnWidth, 220)
+	moveSettings(a.pipFPSCombo, 40+columnWidth, pipTop+120, columnWidth, 220)
+
+	a.syncSettingsVisibility()
 	a.hideClickPointPreview()
 	procInvalidateRect.Call(a.hwnd, 0, 1)
+}
+
+func (a *application) syncSettingsVisibility() {
+	visibility := []struct {
+		hwnd    uintptr
+		visible bool
+	}{
+		{a.intervalEdit, a.clickerSettingsExpanded},
+		{a.holdButton, a.clickerSettingsExpanded},
+		{a.hotkeyButton, a.clickerSettingsExpanded},
+		{a.pipButton, a.pipSettingsExpanded},
+		{a.pipSizeCombo, a.pipSettingsExpanded},
+		{a.pipFPSCombo, a.pipSettingsExpanded},
+	}
+	for _, item := range visibility {
+		if item.hwnd == 0 {
+			continue
+		}
+		mode := uintptr(swHide)
+		if item.visible {
+			mode = swShowNoActivate
+		}
+		procShowWindow.Call(item.hwnd, mode)
+	}
+}
+
+func (a *application) updateSettingsHeaders() {
+	interval := strings.TrimSpace(windowText(a.intervalEdit))
+	if interval == "" {
+		interval = strconv.Itoa(minIntervalMS)
+	}
+	hold := "Hold off"
+	if a.hold {
+		hold = "Hold on"
+	}
+	clickerState := "collapsed"
+	if a.clickerSettingsExpanded {
+		clickerState = "expanded"
+	}
+	pipState := "collapsed"
+	if a.pipSettingsExpanded {
+		pipState = "expanded"
+	}
+	if a.clickerSettingsButton != 0 {
+		setWindowText(a.clickerSettingsButton, fmt.Sprintf("Clicker settings, %s ms, %s, %s, %s", interval, hold, a.hotkey.name(), clickerState))
+	}
+	if a.pipSettingsButton != 0 {
+		mode := "Off"
+		if a.pip.enabled {
+			mode = "On"
+		}
+		setWindowText(a.pipSettingsButton, fmt.Sprintf("Picture-in-picture settings, %s, %d x %d, %d FPS, %s", mode, a.pip.options.width, a.pip.options.height, a.pip.options.fps, pipState))
+	}
+}
+
+func (a *application) clickerSettingsSummary() string {
+	interval := strings.TrimSpace(windowText(a.intervalEdit))
+	if interval == "" {
+		interval = strconv.Itoa(minIntervalMS)
+	}
+	hold := "Hold off"
+	if a.hold {
+		hold = "Hold on"
+	}
+	return fmt.Sprintf("%s ms / %s / %s", interval, hold, a.hotkey.name())
+}
+
+func (a *application) pipSettingsSummary() string {
+	mode := "Off"
+	if a.pip.enabled {
+		mode = "On"
+	}
+	return fmt.Sprintf("%s / %d x %d / %d FPS", mode, a.pip.options.width, a.pip.options.height, a.pip.options.fps)
 }
 
 func (a *application) setStatus(text string, isError bool) {
@@ -313,7 +412,8 @@ func (a *application) updateControls() {
 		action = "Stop clicker"
 	}
 	setWindowText(a.toggleButton, action+" ["+a.hotkey.name()+"]")
-	for _, hwnd := range []uintptr{a.pickerButton, a.clickPointButton, a.holdButton, a.hotkeyButton, a.toggleButton, a.hwnd} {
+	a.updateSettingsHeaders()
+	for _, hwnd := range []uintptr{a.pickerButton, a.clickPointButton, a.holdButton, a.hotkeyButton, a.toggleButton, a.clickerSettingsButton, a.pipSettingsButton, a.hwnd} {
 		if hwnd != 0 {
 			procInvalidateRect.Call(hwnd, 0, 1)
 		}
@@ -441,6 +541,23 @@ func (a *application) handleCommand(id, notification uint16) {
 		if notification == bnClicked {
 			a.toggle()
 		}
+	case idClickerSettings:
+		if notification == bnClicked {
+			a.clickerSettingsExpanded = !a.clickerSettingsExpanded
+			a.updateSettingsHeaders()
+			a.layout()
+		}
+	case idPIPSettings:
+		if notification == bnClicked {
+			a.pipSettingsExpanded = !a.pipSettingsExpanded
+			a.updateSettingsHeaders()
+			a.layout()
+		}
+	case idInterval:
+		if notification == enChange {
+			a.updateSettingsHeaders()
+			procInvalidateRect.Call(a.clickerSettingsButton, 0, 1)
+		}
 	case idPIP:
 		if notification == bnClicked {
 			if a.pip.enabled {
@@ -448,10 +565,14 @@ func (a *application) handleCommand(id, notification uint16) {
 			} else {
 				a.enablePIP()
 			}
+			a.updateSettingsHeaders()
+			procInvalidateRect.Call(a.pipSettingsButton, 0, 1)
 		}
 	case idPIPSize, idPIPFPS:
 		if notification == cbnSelChange {
 			a.changePIPOptions()
+			a.updateSettingsHeaders()
+			procInvalidateRect.Call(a.pipSettingsButton, 0, 1)
 		}
 	}
 }
@@ -491,13 +612,17 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 		}
 	case wmGetMinMaxInfo:
 		info := (*minMaxInfo)(unsafe.Pointer(lparam))
-		info.minTrackSize = point{a.s(536), a.s(360)}
+		info.minTrackSize = point{a.s(536), a.s(450)}
 		return 0
 	case 0x0115: // WM_VSCROLL
 		a.handleScroll(loword(wparam))
 		return 0
 	case 0x020A: // WM_MOUSEWHEEL
-		a.scrollBy(-int32(int16(hiword(wparam))) * 48 / 120)
+		position := point{x: int32(int16(loword(lparam))), y: int32(int16(hiword(lparam)))}
+		procScreenToClient.Call(hwnd, uintptr(unsafe.Pointer(&position)))
+		if position.y >= a.s(settingsTop) {
+			a.scrollBy(-int32(int16(hiword(wparam))) * 48 / 120)
+		}
 		return 0
 	case wmCommand:
 		a.handleCommand(loword(wparam), hiword(wparam))
