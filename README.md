@@ -8,10 +8,11 @@ network requests, or background services.
 
 Open **`dist/spencer-clicker.exe`** on Windows 10/11 x64.
 
-1. Open the target-window dropdown and select an application. Opening the list refreshes it. You can also click the magnifying-glass button beside the dropdown, then click the target at the point where you want clicks sent. This records the point and, when present, its child input window. Press Escape or click the picker button again to cancel; clicks on Spencer Clicker and invalid windows pass through normally.
-2. Set the click interval, or turn on **Hold left click**.
-3. Click **Start clicker** or press **F9** anywhere. Press again to stop.
-4. Click the hotkey button to bind any single keyboard key, right/middle mouse,
+1. Open the target-window dropdown and select an application. Opening the list refreshes it. You can also use the magnifying-glass button to select a target window under the cursor.
+2. Click **Choose Click** to select a custom click spot inside the target. Without a custom spot, clicks go to the center of the application client area. Press Escape or click the button again to cancel; clicks on Spencer Clicker and invalid windows pass through normally.
+3. Set the click interval, or turn on **Hold left click**.
+4. Click **Start clicker** or press **F9** anywhere. Press again to stop.
+5. Click the hotkey button to bind any single keyboard key, right/middle mouse,
    Mouse 4, or Mouse 5. Click the hotkey button again to cancel binding.
    Left mouse is reserved for normal UI interaction. Held keys do not repeatedly toggle.
 
@@ -27,9 +28,18 @@ still stops clicking and exits. Exiting removes the icon, and restarting Explore
 restores the current status icon automatically. The footer also reports state in text.
 
 Settings match the C# application: F9 by default, a 50 ms interval (minimum 20 ms),
-and hold mode off. Settings are session-only, as in the original. Intervals above
-2,147,483,647 ms are clamped to that Windows timer limit. Blank or smaller values
-become 20 ms; invalid pasted text produces an inline error.
+and hold mode off. The interval, hold mode, hotkey, selected target, custom click
+spot, and PiP size/refresh rate are saved locally and restored on the next launch.
+The clicker and PiP preview always start off. Intervals above 2,147,483,647 ms are
+clamped to that Windows timer limit. Blank or smaller values become 20 ms; invalid
+pasted text produces an inline error.
+
+Saved click presets are grouped by target window and can be created, loaded,
+overwritten, or deleted from the **Saved clicks** drawer. The compact JSON file is
+`%APPDATA%\SpencerClicker\settings.json`; it can be backed up or shared. Target
+records use the executable path, window class, and title instead of transient
+Windows handles. Missing applications are pruned; ambiguous windows are not
+restored automatically.
 
 Each normal click presses for approximately **10 ms**, releases, then waits the
 configured interval. Thus 50 ms means roughly a 60 ms cycle, not 20 clicks per
@@ -50,7 +60,7 @@ Choose a maximum preview size of **160 x 90**, **320 x 180**, **480 x 270**, or
 **640 x 360**, and a refresh limit of **1, 2, 5, 10, 15, or 30 FPS**. The default
 is **320 x 180 at 5 FPS**. Content keeps its aspect ratio with black padding;
 changing the target, size, or refresh limit safely restarts the capture session.
-These settings are session-only, like the clicker settings.
+The selected preview size and refresh rate persist with the other settings; the preview itself starts off.
 
 PiP requires **Windows 11 24H2 or newer** and a compatible graphics driver.
 It uses Windows Graphics Capture's
@@ -77,10 +87,10 @@ not send mouse input to the target. Target closure or sleep switches PiP off.
 ## Compatibility with the original
 
 Input uses `PostMessage(WM_LBUTTONDOWN/UP)` without moving the physical cursor
-or taking focus. The target dropdown sends to the window center. The picker also
-records the clicked client-area point and sends to the child window under that
-point when one exists; this can help games whose input is handled by an inner
-window. This remains best-effort: games that use Raw Input, DirectInput, or
+or taking focus. The target dropdown and magnifying-glass picker select the window, and the default
+click point is its client-area center. **Choose Click** records a custom point and
+sends to the child window under that point when one exists; this can help games
+whose input is handled by an inner window. This remains best-effort: games that use Raw Input, DirectInput, or
 another input path may ignore posted mouse messages. Covered windows can still
 process posted messages, while minimized games may pause their own processing.
 If Windows reports access denied, run the clicker at the same administrator

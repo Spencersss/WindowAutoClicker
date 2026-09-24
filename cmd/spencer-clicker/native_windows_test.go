@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"syscall"
 	"testing"
@@ -446,6 +447,13 @@ func TestApplicationLifecycle(t *testing.T) {
 	target := makeFixture(t, false)
 	defer procDestroyWindow.Call(target)
 	a := newApplication()
+	// Keep the lifecycle test isolated from the user's persisted preferences.
+	a.settingsPath = filepath.Join(t.TempDir(), "settings.json")
+	a.settings = defaultAppSettings()
+	a.settingsWritable = true
+	a.hotkey = hotkey{keyboardHotkey, vkF9}
+	a.hold = false
+	a.pip.options = captureOptions{width: 320, height: 180, fps: 5}
 	activeApp = a
 	a.instance, _, _ = procGetModuleHandle.Call(0)
 	a.bgBrush, _, _ = procCreateSolidBrush.Call(colorBG)

@@ -129,6 +129,7 @@ const (
 	gwlExStyle       = -20
 
 	processQueryLimitedInformation = 0x1000
+	monitorDefaultToNearest        = 2
 
 	colorWindow = 5
 	transparent = 1
@@ -263,6 +264,8 @@ var (
 	procScreenToClient                = user32.NewProc("ScreenToClient")
 	procGetWindowLongPtr              = user32.NewProc("GetWindowLongPtrW")
 	procGetClientRect                 = user32.NewProc("GetClientRect")
+	procMonitorFromWindow             = user32.NewProc("MonitorFromWindow")
+	procGetMonitorInfo                = user32.NewProc("GetMonitorInfoW")
 	procGetClientRectRaw              = procGetClientRect
 	procGetWindowThreadProcessID      = user32.NewProc("GetWindowThreadProcessId")
 	procOpenProcess                   = kernel32.NewProc("OpenProcess")
@@ -325,6 +328,12 @@ var (
 
 type point struct{ x, y int32 }
 type rect struct{ left, top, right, bottom int32 }
+type monitorInfo struct {
+	cbSize  uint32
+	monitor rect
+	work    rect
+	flags   uint32
+}
 type msg struct {
 	hwnd           uintptr
 	message        uint32
