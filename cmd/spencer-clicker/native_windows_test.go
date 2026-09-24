@@ -258,7 +258,7 @@ func TestPickerConsumesValidSelectionClick(t *testing.T) {
 		t.Fatalf("pickInputAt = %x, %t; want child %x, true", inputHwnd, ok, fixture.label)
 	}
 	mainWindowProc(a.hwnd, wmAppPickTarget, inputHwnd, packPoint(data.pt))
-	if a.picker || !a.pickerConsumed || a.selected.hwnd != hwnd || a.selected.inputHwnd != fixture.label || !a.selected.hasInputPoint {
+	if a.picker || !a.pickerConsumed || a.selected.hwnd != hwnd || a.selected.inputHwnd != fixture.label || a.selected.hasInputPoint {
 		t.Fatalf("selection dispatch state = picker %t, consumed %t, selected %+v", a.picker, a.pickerConsumed, a.selected)
 	}
 	if got := mouseHookProc(hcAction, wmLButtonUp, data); got != 1 || a.pickerConsumed {
@@ -403,9 +403,28 @@ func TestPickerStateAndSelection(t *testing.T) {
 	var bounds rect
 	procGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&bounds)))
 	screenPoint := point{(bounds.left + bounds.right) / 2, (bounds.top + bounds.bottom) / 2}
-	a.selectPickedTarget(hwnd, screenPoint)
-	if a.picker || a.selected.hwnd != hwnd || a.selected.pid != windowPID(hwnd) || !a.selected.hasInputPoint {
+	a.selectPickedTarget(fixture.label, screenPoint)
+	if a.picker || a.selected.hwnd != hwnd || a.selected.pid != windowPID(hwnd) || a.selected.inputHwnd != fixture.label || a.selected.hasInputPoint {
 		t.Fatalf("picked target state = picker %t, selected %+v", a.picker, a.selected)
+	}
+	var client rect
+	if !getClientRect(hwnd, &client) {
+		t.Fatal("could not get selected target client area")
+	}
+	clickPoint, centered, valid := targetClickPoint(a.selected)
+	wantCenter := point{x: client.right / 2, y: client.bottom / 2}
+	if !valid || !centered || clickPoint != wantCenter {
+		t.Fatalf("targetClickPoint = %+v, centered=%t, valid=%t; want center %+v", clickPoint, centered, valid, wantCenter)
+	}
+	foundTargetChild := false
+	for _, target := range a.targets {
+		if target.hwnd == hwnd && target.pid == windowPID(hwnd) && target.inputHwnd == fixture.label {
+			foundTargetChild = true
+			break
+		}
+	}
+	if !foundTargetChild {
+		t.Fatal("target refresh lost the selected child window")
 	}
 
 	previous := a.selected

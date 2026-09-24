@@ -101,10 +101,12 @@ func (a *application) refreshTargets() {
 	}
 	found := false
 	for i, target := range a.targets {
-		if target.hwnd == a.selected.hwnd && target.pid == a.selected.pid && a.selected.hasInputPoint {
+		if target.hwnd == a.selected.hwnd && target.pid == a.selected.pid {
 			target.inputHwnd = a.selected.inputHwnd
-			target.inputPoint = a.selected.inputPoint
-			target.hasInputPoint = true
+			if a.selected.hasInputPoint {
+				target.inputPoint = a.selected.inputPoint
+				target.hasInputPoint = true
+			}
 			a.targets[i] = target
 		}
 		label := target.title
@@ -644,7 +646,7 @@ func (a *application) togglePicker() {
 	a.refreshTargets()
 	a.clearPickerPreview()
 	a.picker, a.pickerConsumed = true, false
-	a.setStatus("Click the target at the desired click point. Escape or Pick target to cancel.", false)
+	a.setStatus("Click the target window. Escape or Pick target to cancel.", false)
 	a.updateControls()
 }
 
@@ -717,7 +719,7 @@ func (a *application) selectPickedClickPoint(inputHwnd uintptr, screenPoint poin
 	a.updateControls()
 	return true
 }
-func (a *application) selectPickedTarget(inputHwnd uintptr, screenPoint point) {
+func (a *application) selectPickedTarget(inputHwnd uintptr, _ point) {
 	if !a.picker || inputHwnd == 0 || inputHwnd == a.hwnd || !isWindow(inputHwnd) {
 		return
 	}
@@ -730,14 +732,6 @@ func (a *application) selectPickedTarget(inputHwnd uintptr, screenPoint point) {
 		return
 	}
 	target.inputHwnd = inputHwnd
-	rootPoint := screenPoint
-	if result, _, _ := procScreenToClient.Call(root, uintptr(unsafe.Pointer(&rootPoint))); result != 0 {
-		var rootBounds rect
-		if getClientRect(root, &rootBounds) && pointInClient(rootPoint, rootBounds) {
-			target.inputPoint = rootPoint
-			target.hasInputPoint = true
-		}
-	}
 	a.clearPickerPreview()
 	a.selected = target
 	a.picker = false
