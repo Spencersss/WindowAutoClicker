@@ -128,6 +128,8 @@ const (
 	cwpSkipInvisible = 0x0001
 	gwlExStyle       = -20
 
+	processQueryLimitedInformation = 0x1000
+
 	colorWindow = 5
 	transparent = 1
 
@@ -249,6 +251,7 @@ var (
 	procSetWindowText                 = user32.NewProc("SetWindowTextW")
 	procGetWindowText                 = user32.NewProc("GetWindowTextW")
 	procGetWindowTextLength           = user32.NewProc("GetWindowTextLengthW")
+	procGetClassName                  = user32.NewProc("GetClassNameW")
 	procEnumWindows                   = user32.NewProc("EnumWindows")
 	procIsWindowVisible               = user32.NewProc("IsWindowVisible")
 	procIsWindow                      = user32.NewProc("IsWindow")
@@ -262,6 +265,9 @@ var (
 	procGetClientRect                 = user32.NewProc("GetClientRect")
 	procGetClientRectRaw              = procGetClientRect
 	procGetWindowThreadProcessID      = user32.NewProc("GetWindowThreadProcessId")
+	procOpenProcess                   = kernel32.NewProc("OpenProcess")
+	procQueryFullProcessImageName     = kernel32.NewProc("QueryFullProcessImageNameW")
+	procCloseHandle                   = kernel32.NewProc("CloseHandle")
 	procGetCurrentProcessID           = kernel32.NewProc("GetCurrentProcessId")
 	procSetTimer                      = user32.NewProc("SetTimer")
 	procKillTimer                     = user32.NewProc("KillTimer")

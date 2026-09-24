@@ -296,7 +296,36 @@ func targetWindowFor(hwnd uintptr) (targetWindow, bool) {
 	if visible == 0 || pid == 0 || pid == a.pid || owner != 0 || style&wsExToolWindow != 0 || title == "" {
 		return targetWindow{}, false
 	}
-	return targetWindow{hwnd: hwnd, pid: pid, title: title}, true
+	return targetWindow{hwnd: hwnd, pid: pid, title: title, identity: windowIdentityFor(hwnd, pid, title)}, true
+}
+
+func windowIdentityFor(hwnd uintptr, pid uint32, title string) windowIdentity {
+	identity := windowIdentity{WindowClass: windowClassName(hwnd), Title: title}
+	process, _, _ := procOpenProcess.Call(processQueryLimitedInformation, 0, uintptr(pid))
+	if process == 0 {
+		return identity
+	}
+	defer procCloseHandle.Call(process)
+
+	buffer := make([]uint16, 32768)
+	length := uint32(len(buffer))
+	ok, _, _ := procQueryFullProcessImageName.Call(process, 0, uintptr(unsafe.Pointer(&buffer[0])), uintptr(unsafe.Pointer(&length)))
+	if ok != 0 && length > 0 {
+		identity.ExecutablePath = normalizeExecutablePath(syscall.UTF16ToString(buffer[:length]))
+	}
+	return identity
+}
+
+func windowClassName(hwnd uintptr) string {
+	if hwnd == 0 {
+		return ""
+	}
+	buffer := make([]uint16, 256)
+	length, _, _ := procGetClassName.Call(hwnd, uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)))
+	if length == 0 {
+		return ""
+	}
+	return syscall.UTF16ToString(buffer[:length])
 }
 
 func pickTargetAt(screen point) (uintptr, bool) {
