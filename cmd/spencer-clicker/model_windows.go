@@ -73,9 +73,12 @@ func normalizeInterval(value int) int {
 }
 
 type targetWindow struct {
-	hwnd  uintptr
-	title string
-	pid   uint32
+	hwnd          uintptr
+	title         string
+	pid           uint32
+	inputHwnd     uintptr
+	inputPoint    point
+	hasInputPoint bool
 }
 
 func sortTargets(targets []targetWindow) {

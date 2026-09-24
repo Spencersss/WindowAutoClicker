@@ -8,7 +8,7 @@ network requests, or background services.
 
 Open **`dist/spencer-clicker.exe`** on Windows 10/11 x64.
 
-1. Open the target-window dropdown and select an application. Opening the list refreshes it. You can also click the magnifying-glass button beside the dropdown, then click any visible top-level application window to choose it directly. Press Escape or click the picker button again to cancel; clicks on Spencer Clicker and invalid windows pass through normally.
+1. Open the target-window dropdown and select an application. Opening the list refreshes it. You can also click the magnifying-glass button beside the dropdown, then click the target at the point where you want clicks sent. This records the point and, when present, its child input window. Press Escape or click the picker button again to cancel; clicks on Spencer Clicker and invalid windows pass through normally.
 2. Set the click interval, or turn on **Hold left click**.
 3. Click **Start clicker** or press **F9** anywhere. Press again to stop.
 4. Click the hotkey button to bind any single keyboard key, right/middle mouse,
@@ -76,11 +76,15 @@ not send mouse input to the target. Target closure or sleep switches PiP off.
 
 ## Compatibility with the original
 
-Input uses `PostMessage(WM_LBUTTONDOWN/UP)` to the selected top-level window,
-without moving the physical cursor or taking focus. Applications that ignore
-these messages (including some games/raw-input applications) will also ignore
-this clicker. A minimized target may stop processing input. If Windows reports access denied,
-run the clicker at the same administrator level as the target.
+Input uses `PostMessage(WM_LBUTTONDOWN/UP)` without moving the physical cursor
+or taking focus. The target dropdown sends to the window center. The picker also
+records the clicked client-area point and sends to the child window under that
+point when one exists; this can help games whose input is handled by an inner
+window. This remains best-effort: games that use Raw Input, DirectInput, or
+another input path may ignore posted mouse messages. Covered windows can still
+process posted messages, while minimized games may pause their own processing.
+If Windows reports access denied, run the clicker at the same administrator
+level as the target.
 
 Improvements over the old implementation:
 

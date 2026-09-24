@@ -345,8 +345,27 @@ func (a *application) toggle() {
 		a.setStatus("Target closed. Select another window.", true)
 		return
 	}
-	// Mouse messages expect client coordinates, excluding borders/title bar.
-	a.driver.coords = uintptr(uint32(uint16(bounds.right/2)) | uint32(uint16(bounds.bottom/2))<<16)
+	// The dropdown uses the client-area center. The picker remembers a point
+	// and child input window, which helps games with nested input surfaces.
+	clickPoint := point{x: bounds.right / 2, y: bounds.bottom / 2}
+	if a.selected.hasInputPoint && pointInClient(a.selected.inputPoint, bounds) {
+		clickPoint = a.selected.inputPoint
+	}
+	a.driver.rootCoords = mouseCoords(clickPoint)
+	a.driver.inputHwnd = 0
+	a.driver.coords = a.driver.rootCoords
+	if inputHwnd := a.selected.inputHwnd; inputWindowBelongsTo(inputHwnd, a.selected) && inputHwnd != a.selected.hwnd {
+		screenPoint := clickPoint
+		toScreen, _, _ := procClientToScreen.Call(a.selected.hwnd, uintptr(unsafe.Pointer(&screenPoint)))
+		if toScreen != 0 {
+			toInput, _, _ := procScreenToClient.Call(inputHwnd, uintptr(unsafe.Pointer(&screenPoint)))
+			var inputBounds rect
+			if toInput != 0 && getClientRect(inputHwnd, &inputBounds) && pointInClient(screenPoint, inputBounds) {
+				a.driver.inputHwnd = inputHwnd
+				a.driver.coords = mouseCoords(screenPoint)
+			}
+		}
+	}
 	if err := a.clicker.start(interval, a.hold); err != nil {
 		a.setStatus(err.Error(), true)
 		return
@@ -477,7 +496,7 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 		}
 		return 0
 	case wmAppPickTarget:
-		a.selectPickedTarget(wparam)
+		a.selectPickedTarget(wparam, unpackPoint(lparam))
 		return 0
 	case wmAppPickReleased:
 		a.updateControls()

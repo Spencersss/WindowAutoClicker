@@ -17,10 +17,12 @@ var (
 )
 
 type nativeDriver struct {
-	owner   uintptr
-	target  targetWindow
-	coords  uintptr
-	timerID uintptr
+	owner      uintptr
+	target     targetWindow
+	inputHwnd  uintptr
+	coords     uintptr
+	rootCoords uintptr
+	timerID    uintptr
 }
 
 func windowPID(hwnd uintptr) uint32 {
@@ -38,7 +40,11 @@ func (d *nativeDriver) button(down bool) error {
 	if down {
 		message, flags = wmLButtonDown, mkLButton
 	}
-	ok, _, err := procPostMessage.Call(d.target.hwnd, uintptr(message), flags, d.coords)
+	hwnd, coords := d.inputHwnd, d.coords
+	if !inputWindowBelongsTo(hwnd, d.target) {
+		hwnd, coords = d.target.hwnd, d.rootCoords
+	}
+	ok, _, err := procPostMessage.Call(hwnd, uintptr(message), flags, coords)
 	if ok == 0 {
 		if err == syscall.Errno(5) {
 			return fmt.Errorf("Access denied. Match the target's administrator level.")
@@ -194,9 +200,9 @@ func mouseHookProc(code int32, wparam uintptr, data *msLLHookStruct) uintptr {
 			}
 		}
 		if a.picker && uint32(wparam) == wmLButtonDown {
-			if target, ok := pickTargetAt(data.pt); ok {
+			if _, inputHwnd, ok := pickInputAt(data.pt); ok {
 				a.pickerConsumed = true
-				postMessage(a.hwnd, wmAppPickTarget, target, 0)
+				postMessage(a.hwnd, wmAppPickTarget, inputHwnd, packPoint(data.pt))
 				return 1
 			}
 		}
@@ -225,6 +231,27 @@ func windowFromPoint(screen point) uintptr {
 	packed := uintptr(uint32(screen.x)) | uintptr(uint64(uint32(screen.y))<<32)
 	hwnd, _, _ := procWindowFromPoint.Call(packed)
 	return hwnd
+}
+
+func packPoint(p point) uintptr {
+	return uintptr(uint64(uint32(p.x)) | uint64(uint32(p.y))<<32)
+}
+
+func unpackPoint(packed uintptr) point {
+	return point{x: int32(uint32(packed)), y: int32(uint32(uint64(packed) >> 32))}
+}
+
+func mouseCoords(p point) uintptr {
+	return uintptr(uint32(uint16(p.x)) | uint32(uint16(p.y))<<16)
+}
+
+func isChildWindow(parent, child uintptr) bool {
+	result, _, _ := procIsChild.Call(parent, child)
+	return result != 0
+}
+
+func pointInClient(p point, bounds rect) bool {
+	return p.x >= bounds.left && p.x < bounds.right && p.y >= bounds.top && p.y < bounds.bottom
 }
 
 func targetWindowFor(hwnd uintptr) (targetWindow, bool) {
@@ -257,6 +284,35 @@ func pickTargetAt(screen point) (uintptr, bool) {
 		return target.hwnd, true
 	}
 	return 0, false
+}
+
+// pickInputAt keeps the child HWND hit by the user while retaining the root
+// window for target identity, lifetime checks, and picture-in-picture capture.
+func pickInputAt(screen point) (targetWindow, uintptr, bool) {
+	hwnd := windowFromPoint(screen)
+	if hwnd == 0 {
+		return targetWindow{}, 0, false
+	}
+	root, _, _ := procGetAncestor.Call(hwnd, gaRoot)
+	if root == 0 {
+		return targetWindow{}, 0, false
+	}
+	target, ok := targetWindowFor(root)
+	if !ok || windowPID(hwnd) != target.pid || (hwnd != root && !isChildWindow(root, hwnd)) {
+		return targetWindow{}, 0, false
+	}
+	return target, hwnd, true
+}
+
+func inputWindowBelongsTo(hwnd uintptr, target targetWindow) bool {
+	if hwnd == 0 || target.hwnd == 0 || !isWindow(hwnd) || windowPID(hwnd) != target.pid {
+		return false
+	}
+	if hwnd == target.hwnd {
+		return true
+	}
+	root, _, _ := procGetAncestor.Call(hwnd, gaRoot)
+	return root == target.hwnd && isChildWindow(target.hwnd, hwnd)
 }
 
 func (a *application) targetIndex(target targetWindow) int {
@@ -358,7 +414,7 @@ func (a *application) togglePicker() {
 	a.refreshTargets()
 	a.clearPickerPreview()
 	a.picker, a.pickerConsumed = true, false
-	a.setStatus("Click a target window. Escape or Pick target to cancel.", false)
+	a.setStatus("Click the target at the desired click point. Escape or Pick target to cancel.", false)
 	a.updateControls()
 }
 func (a *application) cancelPicker() {
@@ -367,13 +423,26 @@ func (a *application) cancelPicker() {
 	a.setStatus("Target picker cancelled.", false)
 	a.updateControls()
 }
-func (a *application) selectPickedTarget(hwnd uintptr) {
-	if !a.picker || hwnd == 0 || hwnd == a.hwnd || !isWindow(hwnd) {
+func (a *application) selectPickedTarget(inputHwnd uintptr, screenPoint point) {
+	if !a.picker || inputHwnd == 0 || inputHwnd == a.hwnd || !isWindow(inputHwnd) {
 		return
 	}
-	target, ok := targetWindowFor(hwnd)
-	if !ok {
+	root, _, _ := procGetAncestor.Call(inputHwnd, gaRoot)
+	if root == 0 || root == a.hwnd {
 		return
+	}
+	target, ok := targetWindowFor(root)
+	if !ok || windowPID(inputHwnd) != target.pid || (inputHwnd != root && !isChildWindow(root, inputHwnd)) {
+		return
+	}
+	target.inputHwnd = inputHwnd
+	rootPoint := screenPoint
+	if result, _, _ := procScreenToClient.Call(root, uintptr(unsafe.Pointer(&rootPoint))); result != 0 {
+		var rootBounds rect
+		if getClientRect(root, &rootBounds) && pointInClient(rootPoint, rootBounds) {
+			target.inputPoint = rootPoint
+			target.hasInputPoint = true
+		}
 	}
 	a.clearPickerPreview()
 	a.selected = target

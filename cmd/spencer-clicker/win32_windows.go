@@ -232,6 +232,8 @@ var (
 	procGetWindow                     = user32.NewProc("GetWindow")
 	procWindowFromPoint               = user32.NewProc("WindowFromPoint")
 	procGetAncestor                   = user32.NewProc("GetAncestor")
+	procClientToScreen                = user32.NewProc("ClientToScreen")
+	procScreenToClient                = user32.NewProc("ScreenToClient")
 	procGetWindowLongPtr              = user32.NewProc("GetWindowLongPtrW")
 	procGetClientRect                 = user32.NewProc("GetClientRect")
 	procGetClientRectRaw              = procGetClientRect
