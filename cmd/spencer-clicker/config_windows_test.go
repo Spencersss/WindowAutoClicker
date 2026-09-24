@@ -143,32 +143,59 @@ func TestPruneUnavailableWindowsKeepsInstalledPrograms(t *testing.T) {
 	}
 }
 
-func TestMatchTargetIdentityRequiresOneExactMatch(t *testing.T) {
+func TestMatchTargetIdentityPrefersExactTitleAndFallsBackOnlyWhenUnique(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "Target.exe")
 	identity := windowIdentity{ExecutablePath: path, WindowClass: "TargetClass", Title: "Target Window"}
-	target := targetWindow{hwnd: 10, pid: 20, identity: identity}
-	candidatePath := filepath.ToSlash(path)
-	target.identity.ExecutablePath = candidatePath
-	want := target.identity
+	targetExact := targetWindow{hwnd: 10, pid: 20, identity: identity}
+	targetRenamed := targetWindow{hwnd: 11, pid: 21, identity: identity}
+	targetRenamed.identity.ExecutablePath = filepath.ToSlash(path)
+	targetRenamed.identity.Title = "Other Window"
+	want := targetExact.identity
 	want.ExecutablePath = normalizeExecutablePath(path)
-	if got, ok := matchTargetIdentity(want, []targetWindow{target}); !ok || got.hwnd != target.hwnd {
-		t.Fatalf("exact normalized identity match = (%+v, %v)", got, ok)
+
+	if got, ok := matchTargetIdentity(want, []targetWindow{targetRenamed, targetExact}); !ok || got.hwnd != targetExact.hwnd {
+		t.Fatalf("exact title match among path/class candidates = (%+v, %v), want hwnd %d", got, ok, targetExact.hwnd)
 	}
-	if _, ok := matchTargetIdentity(identity, []targetWindow{target, target}); ok {
-		t.Fatal("ambiguous identity unexpectedly matched")
+
+	changedTitle := want
+	changedTitle.Title = "Renamed Since Last Run"
+	if got, ok := matchTargetIdentity(changedTitle, []targetWindow{targetExact}); !ok || got.hwnd != targetExact.hwnd {
+		t.Fatalf("unique path/class fallback after title change = (%+v, %v), want hwnd %d", got, ok, targetExact.hwnd)
 	}
-	wrongTitle := target
-	wrongTitle.identity.Title = "Other"
-	if _, ok := matchTargetIdentity(identity, []targetWindow{wrongTitle}); ok {
-		t.Fatal("different title unexpectedly matched")
+	if _, ok := matchTargetIdentity(changedTitle, []targetWindow{targetExact, targetRenamed}); ok {
+		t.Fatal("ambiguous path/class candidates unexpectedly matched after title change")
 	}
-	wrongClass := target
-	wrongClass.identity.WindowClass = "Other"
-	if _, ok := matchTargetIdentity(identity, []targetWindow{wrongClass}); ok {
+	if _, ok := matchTargetIdentity(want, []targetWindow{targetExact, targetExact}); ok {
+		t.Fatal("duplicate exact title candidates unexpectedly matched")
+	}
+
+	emptyStoredTitle := want
+	emptyStoredTitle.Title = ""
+	if got, ok := matchTargetIdentity(emptyStoredTitle, []targetWindow{targetExact}); !ok || got.hwnd != targetExact.hwnd {
+		t.Fatalf("empty stored title did not use unique path/class fallback = (%+v, %v)", got, ok)
+	}
+
+	wrongClass := targetExact
+	wrongClass.identity.WindowClass = "OtherClass"
+	if _, ok := matchTargetIdentity(want, []targetWindow{wrongClass}); ok {
 		t.Fatal("different class unexpectedly matched")
 	}
+	wrongPath := targetExact
+	wrongPath.identity.ExecutablePath = filepath.Join(t.TempDir(), "Other.exe")
+	if _, ok := matchTargetIdentity(want, []targetWindow{wrongPath}); ok {
+		t.Fatal("different executable path unexpectedly matched")
+	}
+	missingIdentity := want
+	missingIdentity.WindowClass = ""
+	if _, ok := matchTargetIdentity(missingIdentity, []targetWindow{targetExact}); ok {
+		t.Fatal("identity without a window class unexpectedly matched")
+	}
+	missingIdentity = want
+	missingIdentity.ExecutablePath = ""
+	if _, ok := matchTargetIdentity(missingIdentity, []targetWindow{targetExact}); ok {
+		t.Fatal("identity without an executable path unexpectedly matched")
+	}
 }
-
 func TestValidSavedPointUsesClientBounds(t *testing.T) {
 	for _, test := range []struct {
 		point  savedPoint

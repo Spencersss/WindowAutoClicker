@@ -230,22 +230,35 @@ func normalizeExecutablePath(path string) string {
 }
 
 func matchTargetIdentity(identity windowIdentity, targets []targetWindow) (targetWindow, bool) {
-	if normalizeExecutablePath(identity.ExecutablePath) == "" || identity.WindowClass == "" || identity.Title == "" {
+	executablePath := normalizeExecutablePath(identity.ExecutablePath)
+	if executablePath == "" || identity.WindowClass == "" {
 		return targetWindow{}, false
 	}
-	var match targetWindow
-	matches := 0
+
+	var pathClassMatches []targetWindow
+	var exactTitleMatches []targetWindow
 	for _, target := range targets {
 		candidate := target.identity
-		if normalizeExecutablePath(candidate.ExecutablePath) == normalizeExecutablePath(identity.ExecutablePath) &&
-			candidate.WindowClass == identity.WindowClass && candidate.Title == identity.Title {
-			match = target
-			matches++
+		if normalizeExecutablePath(candidate.ExecutablePath) != executablePath || candidate.WindowClass != identity.WindowClass {
+			continue
+		}
+		pathClassMatches = append(pathClassMatches, target)
+		if candidate.Title == identity.Title {
+			exactTitleMatches = append(exactTitleMatches, target)
 		}
 	}
-	return match, matches == 1
-}
 
+	if len(exactTitleMatches) == 1 {
+		return exactTitleMatches[0], true
+	}
+	if len(exactTitleMatches) > 1 {
+		return targetWindow{}, false
+	}
+	if len(pathClassMatches) == 1 {
+		return pathClassMatches[0], true
+	}
+	return targetWindow{}, false
+}
 func validSavedPoint(point savedPoint, width, height int32) bool {
 	return width > 0 && height > 0 && point.X >= 0 && point.Y >= 0 && point.X < width && point.Y < height
 }
