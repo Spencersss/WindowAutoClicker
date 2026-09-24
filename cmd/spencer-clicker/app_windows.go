@@ -10,6 +10,7 @@ import (
 const (
 	idProcess = 1001 + iota
 	idPicker
+	idClickPoint
 	idInterval
 	idHold
 	idHotkey
@@ -17,6 +18,8 @@ const (
 	idPIP
 	idPIPSize
 	idPIPFPS
+	idClickerSettings
+	idPIPSettings
 )
 
 const healthTimerID = 0x7FFFFFFF
@@ -27,32 +30,40 @@ const targetControlHeight = targetComboItemHeight + 2
 var activeApp *application
 
 type application struct {
-	scroll                                                                           int32
-	layingOut                                                                        bool
-	instance, hwnd, icon                                                             uintptr
-	tray                                                                             trayIcon
-	taskbarCreated                                                                   uint32
-	pid                                                                              uint32
-	dpi                                                                              int32
-	font, smallFont, titleFont                                                       uintptr
-	bgBrush, fieldBrush                                                              uintptr
-	processCombo, pickerButton, intervalEdit, holdButton, hotkeyButton, toggleButton uintptr
-	keyboardHook, mouseHook                                                          uintptr
-	keysDown                                                                         [256]bool
-	mouseDown                                                                        [5]bool
-	hotkey                                                                           hotkey
-	hold, capture, picker, pickerConsumed                                            bool
-	pickerHover, pickerHighlighted, pickerOriginalBorder                             uintptr
-	pickerOriginalBorderValid                                                        bool
-	pickerPreview                                                                    targetWindow
-	status                                                                           string
-	statusError                                                                      bool
-	targets                                                                          []targetWindow
-	selected                                                                         targetWindow
-	driver                                                                           nativeDriver
-	clicker                                                                          clicker
-	pip                                                                              pictureInPicture
-	pipButton, pipSizeCombo, pipFPSCombo                                             uintptr
+	scroll                                                                                             int32
+	layingOut                                                                                          bool
+	instance, hwnd, icon                                                                               uintptr
+	tray                                                                                               trayIcon
+	taskbarCreated                                                                                     uint32
+	pid                                                                                                uint32
+	dpi                                                                                                int32
+	font, smallFont, titleFont                                                                         uintptr
+	bgBrush, fieldBrush                                                                                uintptr
+	processCombo, pickerButton, clickPointButton, intervalEdit, holdButton, hotkeyButton, toggleButton uintptr
+	clickerSettingsButton, pipSettingsButton                                                           uintptr
+	clickerSettingsExpanded, pipSettingsExpanded                                                       bool
+	keyboardHook, mouseHook                                                                            uintptr
+	keysDown                                                                                           [256]bool
+	mouseDown                                                                                          [5]bool
+	hotkey                                                                                             hotkey
+	hold, capture, picker, pointPicker, pickerConsumed                                                 bool
+	pickerHover, pickerHighlighted, pickerOriginalBorder                                               uintptr
+	pickerOriginalBorderValid                                                                          bool
+	pickerPreview                                                                                      targetWindow
+	clickPreviewOverlay                                                                                uintptr
+	clickPreviewShown                                                                                  bool
+	clickPreviewPoint                                                                                  point
+	clickPreviewMousePoint                                                                             point
+	clickPreviewMovePosted                                                                             bool
+	status                                                                                             string
+	statusError                                                                                        bool
+	targets                                                                                            []targetWindow
+	selected                                                                                           targetWindow
+	driver                                                                                             nativeDriver
+	clicker                                                                                            clicker
+	pip                                                                                                pictureInPicture
+	pipButton, pipSizeCombo, pipFPSCombo                                                               uintptr
+	lastLayout                                                                                         layoutSnapshot
 }
 
 func newApplication() *application {
@@ -80,6 +91,9 @@ func (a *application) run() error {
 	a.icon = a.loadAppIcon()
 	defer a.cleanup()
 	if err := a.registerClass(mainClassName, mainCallback, a.bgBrush); err != nil {
+		return err
+	}
+	if err := a.registerClass(clickPreviewClassName, clickPreviewCallback, 0); err != nil {
 		return err
 	}
 
@@ -141,6 +155,9 @@ func (a *application) cleanup() {
 	a.uninstallHooks()
 	_ = a.clicker.stop()
 	a.tray.remove()
+	if a.clickPreviewOverlay != 0 && isWindow(a.clickPreviewOverlay) {
+		procDestroyWindow.Call(a.clickPreviewOverlay)
+	}
 	if a.hwnd != 0 && isWindow(a.hwnd) {
 		procDestroyWindow.Call(a.hwnd)
 	}
@@ -182,11 +199,14 @@ func (a *application) createControls(hwnd uintptr) {
 	}
 	a.processCombo = create("COMBOBOX", "Target window", wsVScroll|cbsDropdownList|cbsOwnerDrawFixed|cbsHasStrings, idProcess)
 	a.pickerButton = create("BUTTON", "Pick target", bsOwnerDraw, idPicker)
+	a.clickPointButton = create("BUTTON", "Choose Click", bsOwnerDraw, idClickPoint)
+	a.toggleButton = create("BUTTON", "Start clicker [F9]", bsOwnerDraw, idToggle)
+	a.clickerSettingsButton = create("BUTTON", "Clicker settings", bsOwnerDraw, idClickerSettings)
 	a.intervalEdit = create("EDIT", "50", esNumber|esAutoHScroll, idInterval)
 	sendMessage(a.intervalEdit, emSetLimitText, 10, 0)
 	a.holdButton = create("BUTTON", "Hold left click: Off", bsOwnerDraw, idHold)
 	a.hotkeyButton = create("BUTTON", "Hotkey: F9", bsOwnerDraw, idHotkey)
-	a.toggleButton = create("BUTTON", "Start clicker [F9]", bsOwnerDraw, idToggle)
+	a.pipSettingsButton = create("BUTTON", "Picture-in-picture settings", bsOwnerDraw, idPIPSettings)
 	a.pipButton = create("BUTTON", "Picture-in-picture: Off", bsOwnerDraw, idPIP)
 	a.pipSizeCombo = create("COMBOBOX", "Preview resolution", cbsDropdownList|cbsOwnerDrawFixed|cbsHasStrings, idPIPSize)
 	a.pipFPSCombo = create("COMBOBOX", "Preview refresh rate", cbsDropdownList|cbsOwnerDrawFixed|cbsHasStrings, idPIPFPS)
@@ -198,12 +218,54 @@ func (a *application) createControls(hwnd uintptr) {
 	}
 	sendMessage(a.pipSizeCombo, cbSetCurSel, 1, 0)
 	sendMessage(a.pipFPSCombo, cbSetCurSel, 2, 0)
+	a.updateSettingsHeaders()
 	a.applyFonts()
 	a.layout()
 	dark := int32(1)
 	procDwmSetWindowAttribute.Call(hwnd, 20, uintptr(unsafe.Pointer(&dark)), unsafe.Sizeof(dark))
 	caption := uint32(colorBG)
 	procDwmSetWindowAttribute.Call(hwnd, 35, uintptr(unsafe.Pointer(&caption)), unsafe.Sizeof(caption))
+}
+
+const (
+	targetControlTop int32 = 134
+	chooseClickTop   int32 = 189
+)
+
+type childPlacement struct {
+	hwnd                uintptr
+	x, y, width, height int32
+	visible             bool
+}
+
+type placementChange struct {
+	previous, current childPlacement
+	hasPrevious       bool
+}
+
+type layoutSnapshot struct {
+	children                  []childPlacement
+	scroll, contentHeight     int32
+	clientWidth, clientHeight int32
+	dpi                       int32
+	valid                     bool
+}
+
+func diffChildPlacements(previous, current []childPlacement) []placementChange {
+	previousByWindow := make(map[uintptr]childPlacement, len(previous))
+	for _, item := range previous {
+		previousByWindow[item.hwnd] = item
+	}
+
+	changes := make([]placementChange, 0, len(current))
+	for _, item := range current {
+		old, found := previousByWindow[item.hwnd]
+		if found && old == item {
+			continue
+		}
+		changes = append(changes, placementChange{previous: old, current: item, hasPrevious: found})
+	}
+	return changes
 }
 
 func (a *application) layout() {
@@ -214,25 +276,173 @@ func (a *application) layout() {
 	defer func() { a.layingOut = false }()
 	var bounds rect
 	getClientRect(a.hwnd, &bounds)
-	page := bounds.bottom * 96 / a.dpi
-	a.scroll = clampScroll(a.scroll, page)
-	info := scrollInfo{size: uint32(unsafe.Sizeof(scrollInfo{})), mask: 1 | 2 | 4, max: mainContentHeight - 1, page: uint32(max(1, page)), pos: a.scroll}
+	page := a.settingsViewportPage()
+	contentHeight := a.settingsContentHeight()
+	a.scroll = clampScroll(a.scroll, page, contentHeight)
+	info := scrollInfo{size: uint32(unsafe.Sizeof(scrollInfo{})), mask: 1 | 2 | 4, max: max(0, contentHeight-1), page: uint32(max(1, page)), pos: a.scroll}
 	procSetScrollInfo.Call(a.hwnd, 1, uintptr(unsafe.Pointer(&info)), 1)
 	getClientRect(a.hwnd, &bounds)
-	w, h := bounds.right*96/a.dpi, max(mainContentHeight, page)
-	move := func(hwnd uintptr, x, y, width, height int32) {
-		procMoveWindow.Call(hwnd, uintptr(a.s(x)), uintptr(a.s(y-a.scroll)), uintptr(a.s(width)), uintptr(a.s(height)), 1)
+	w := bounds.right * 96 / a.dpi
+	placements := make([]childPlacement, 0, 12)
+	place := func(hwnd uintptr, x, y, width, height int32, visible bool) {
+		if hwnd != 0 {
+			placements = append(placements, childPlacement{hwnd: hwnd, x: x, y: y, width: width, height: height, visible: visible})
+		}
 	}
-	move(a.processCombo, 28, 134, w-106, 300)
-	move(a.pickerButton, w-70, 134, 42, targetControlHeight)
-	move(a.intervalEdit, w-174, 243, 112, 26)
-	move(a.holdButton, w-158, 305, 130, 42)
-	move(a.hotkeyButton, w-218, 381, 190, 42)
-	move(a.pipButton, w-158, 461, 130, 42)
-	move(a.pipSizeCombo, 28, 551, 230, 220)
-	move(a.pipFPSCombo, w-198, 551, 170, 240)
-	move(a.toggleButton, 28, h-100, w-56, 48)
-	procInvalidateRect.Call(a.hwnd, 0, 1)
+	placeSettings := func(hwnd uintptr, x, y, width, height int32, visible bool) {
+		screenY := y - a.scroll
+		if screenY < settingsTop {
+			screenY = -height - 1
+		}
+		place(hwnd, x, screenY, width, height, visible)
+	}
+
+	// The essentials remain anchored to the window while only the settings
+	// cards move with the vertical scrollbar.
+	place(a.processCombo, 28, targetControlTop, w-106, 300, true)
+	place(a.pickerButton, w-70, targetControlTop, 42, targetControlHeight, true)
+	place(a.clickPointButton, 28, chooseClickTop, 156, 36, true)
+	place(a.toggleButton, 28, 256, w-56, 44, true)
+
+	clickerTop := settingsTop
+	pipTop := clickerTop + clickerSettingsHeight(a.clickerSettingsExpanded) + settingsSectionGap
+	placeSettings(a.clickerSettingsButton, 28, clickerTop, w-56, settingsSectionHeaderHeight, true)
+	placeSettings(a.pipSettingsButton, 28, pipTop, w-56, settingsSectionHeaderHeight, true)
+	placeSettings(a.intervalEdit, w-174, clickerTop+52, 146, 36, a.clickerSettingsExpanded)
+	placeSettings(a.holdButton, w-158, clickerTop+98, 130, 36, a.clickerSettingsExpanded)
+	placeSettings(a.hotkeyButton, w-158, clickerTop+144, 130, 36, a.clickerSettingsExpanded)
+	placeSettings(a.pipButton, w-158, pipTop+52, 130, 36, a.pipSettingsExpanded)
+	columnWidth := (w - 68) / 2
+	placeSettings(a.pipSizeCombo, 28, pipTop+120, columnWidth, 220, a.pipSettingsExpanded)
+	placeSettings(a.pipFPSCombo, 40+columnWidth, pipTop+120, columnWidth, 220, a.pipSettingsExpanded)
+
+	previousLayout := a.lastLayout
+	previousPlacements := previousLayout.children
+	if previousLayout.valid && previousLayout.dpi != a.dpi {
+		previousPlacements = nil
+	}
+	a.applyChildPlacements(diffChildPlacements(previousPlacements, placements))
+	if !previousLayout.valid || previousLayout.clientWidth != bounds.right || previousLayout.clientHeight != bounds.bottom || previousLayout.dpi != a.dpi {
+		client := rect{right: bounds.right, bottom: bounds.bottom}
+		procInvalidateRect.Call(a.hwnd, uintptr(unsafe.Pointer(&client)), 0)
+	} else if previousLayout.scroll != a.scroll || previousLayout.contentHeight != contentHeight {
+		settings := rect{top: a.s(settingsTop), right: bounds.right, bottom: bounds.bottom}
+		procInvalidateRect.Call(a.hwnd, uintptr(unsafe.Pointer(&settings)), 0)
+	}
+	a.lastLayout = layoutSnapshot{
+		children: append([]childPlacement(nil), placements...),
+		scroll:   a.scroll, contentHeight: contentHeight,
+		clientWidth: bounds.right, clientHeight: bounds.bottom, dpi: a.dpi, valid: true,
+	}
+	a.hideClickPointPreview()
+}
+
+func (a *application) applyChildPlacements(changes []placementChange) {
+	if len(changes) == 0 {
+		return
+	}
+	flagsFor := func(change placementChange) uintptr {
+		flags := uintptr(swpNoZOrder | swpNoActivate | swpNoRedraw)
+		if !change.current.visible {
+			flags |= swpHideWindow
+		} else if change.hasPrevious && !change.previous.visible {
+			flags |= swpShowWindow
+		}
+		return flags
+	}
+	applyOne := func(change placementChange) {
+		item := change.current
+		procSetWindowPos.Call(item.hwnd, 0,
+			uintptr(a.s(item.x)), uintptr(a.s(item.y)), uintptr(a.s(item.width)), uintptr(a.s(item.height)), flagsFor(change))
+	}
+
+	applied := false
+	batch, _, _ := procBeginDeferWindowPos.Call(uintptr(len(changes)))
+	if batch != 0 {
+		for _, change := range changes {
+			item := change.current
+			batch, _, _ = procDeferWindowPos.Call(batch, item.hwnd, 0,
+				uintptr(a.s(item.x)), uintptr(a.s(item.y)), uintptr(a.s(item.width)), uintptr(a.s(item.height)), flagsFor(change))
+			if batch == 0 {
+				break
+			}
+		}
+		if batch != 0 {
+			ok, _, _ := procEndDeferWindowPos.Call(batch)
+			applied = ok != 0
+		}
+	}
+	if !applied {
+		for _, change := range changes {
+			applyOne(change)
+		}
+	}
+
+	for _, change := range changes {
+		if change.hasPrevious && change.previous.visible {
+			a.invalidateExposedPlacement(change.previous)
+		}
+		if !change.current.visible {
+			continue
+		}
+		a.invalidateExposedPlacement(change.current)
+		procRedrawWindow.Call(change.current.hwnd, 0, 0, rdwInvalidate|rdwNoErase|rdwFrame)
+	}
+}
+
+func (a *application) invalidateExposedPlacement(item childPlacement) {
+	left, top := a.s(item.x), a.s(item.y)
+	bounds := rect{left: left, top: top, right: left + a.s(item.width), bottom: top + a.s(item.height)}
+	procInvalidateRect.Call(a.hwnd, uintptr(unsafe.Pointer(&bounds)), 0)
+}
+
+func (a *application) updateSettingsHeaders() {
+	interval := strings.TrimSpace(windowText(a.intervalEdit))
+	if interval == "" {
+		interval = strconv.Itoa(minIntervalMS)
+	}
+	hold := "Hold off"
+	if a.hold {
+		hold = "Hold on"
+	}
+	clickerState := "collapsed"
+	if a.clickerSettingsExpanded {
+		clickerState = "expanded"
+	}
+	pipState := "collapsed"
+	if a.pipSettingsExpanded {
+		pipState = "expanded"
+	}
+	if a.clickerSettingsButton != 0 {
+		setWindowText(a.clickerSettingsButton, fmt.Sprintf("Clicker settings, %s ms, %s, %s, %s", interval, hold, a.hotkey.name(), clickerState))
+	}
+	if a.pipSettingsButton != 0 {
+		mode := "Off"
+		if a.pip.enabled {
+			mode = "On"
+		}
+		setWindowText(a.pipSettingsButton, fmt.Sprintf("Picture-in-picture settings, %s, %d x %d, %d FPS, %s", mode, a.pip.options.width, a.pip.options.height, a.pip.options.fps, pipState))
+	}
+}
+
+func (a *application) clickerSettingsSummary() string {
+	interval := strings.TrimSpace(windowText(a.intervalEdit))
+	if interval == "" {
+		interval = strconv.Itoa(minIntervalMS)
+	}
+	hold := "Hold off"
+	if a.hold {
+		hold = "Hold on"
+	}
+	return fmt.Sprintf("%s ms / %s / %s", interval, hold, a.hotkey.name())
+}
+
+func (a *application) pipSettingsSummary() string {
+	mode := "Off"
+	if a.pip.enabled {
+		mode = "On"
+	}
+	return fmt.Sprintf("%s / %d x %d / %d FPS", mode, a.pip.options.width, a.pip.options.height, a.pip.options.fps)
 }
 
 func (a *application) setStatus(text string, isError bool) {
@@ -245,7 +455,9 @@ func (a *application) updateControls() {
 		if err := a.syncMouseHook(); err != nil {
 			a.capture = false
 			a.picker = false
+			a.pointPicker = false
 			a.pickerConsumed = false
+			a.hideClickPointPreview()
 			a.setStatus(err.Error(), true)
 		}
 	}
@@ -266,6 +478,11 @@ func (a *application) updateControls() {
 		}
 		procEnableWindow.Call(hwnd, enabled)
 	}
+	clickPointEnabled := uintptr(1)
+	if running || a.selected.hwnd == 0 {
+		clickPointEnabled = 0
+	}
+	procEnableWindow.Call(a.clickPointButton, clickPointEnabled)
 	hold := "Off"
 	if a.hold {
 		hold = "On"
@@ -281,12 +498,18 @@ func (a *application) updateControls() {
 	} else {
 		setWindowText(a.pickerButton, "Pick target")
 	}
+	if a.pointPicker {
+		setWindowText(a.clickPointButton, "Click target point")
+	} else {
+		setWindowText(a.clickPointButton, "Choose Click")
+	}
 	action := "Start clicker"
 	if running {
 		action = "Stop clicker"
 	}
 	setWindowText(a.toggleButton, action+" ["+a.hotkey.name()+"]")
-	for _, hwnd := range []uintptr{a.pickerButton, a.holdButton, a.hotkeyButton, a.toggleButton, a.hwnd} {
+	a.updateSettingsHeaders()
+	for _, hwnd := range []uintptr{a.pickerButton, a.clickPointButton, a.holdButton, a.hotkeyButton, a.toggleButton, a.clickerSettingsButton, a.pipSettingsButton, a.hwnd} {
 		if hwnd != 0 {
 			procInvalidateRect.Call(hwnd, 0, 1)
 		}
@@ -318,7 +541,8 @@ func (a *application) toggle() {
 		a.clearPickerPreview()
 	}
 	a.picker = false
-	a.picker = false
+	a.pointPicker = false
+	a.hideClickPointPreview()
 	defer a.updateControls()
 	if a.clicker.running || a.clicker.pressed {
 		if err := a.clicker.stop(); err != nil {
@@ -340,32 +564,12 @@ func (a *application) toggle() {
 	}
 	setWindowText(a.intervalEdit, strconv.Itoa(interval))
 	a.driver.target = a.selected
-	var bounds rect
-	if !a.driver.valid() || !getClientRect(a.selected.hwnd, &bounds) {
+	clickPoint, _, hasPoint := targetClickPoint(a.selected)
+	if !a.driver.valid() || !hasPoint {
 		a.setStatus("Target closed. Select another window.", true)
 		return
 	}
-	// The dropdown uses the client-area center. The picker remembers a point
-	// and child input window, which helps games with nested input surfaces.
-	clickPoint := point{x: bounds.right / 2, y: bounds.bottom / 2}
-	if a.selected.hasInputPoint && pointInClient(a.selected.inputPoint, bounds) {
-		clickPoint = a.selected.inputPoint
-	}
-	a.driver.rootCoords = mouseCoords(clickPoint)
-	a.driver.inputHwnd = 0
-	a.driver.coords = a.driver.rootCoords
-	if inputHwnd := a.selected.inputHwnd; inputWindowBelongsTo(inputHwnd, a.selected) && inputHwnd != a.selected.hwnd {
-		screenPoint := clickPoint
-		toScreen, _, _ := procClientToScreen.Call(a.selected.hwnd, uintptr(unsafe.Pointer(&screenPoint)))
-		if toScreen != 0 {
-			toInput, _, _ := procScreenToClient.Call(inputHwnd, uintptr(unsafe.Pointer(&screenPoint)))
-			var inputBounds rect
-			if toInput != 0 && getClientRect(inputHwnd, &inputBounds) && pointInClient(screenPoint, inputBounds) {
-				a.driver.inputHwnd = inputHwnd
-				a.driver.coords = mouseCoords(screenPoint)
-			}
-		}
-	}
+	configureDriverClickPoint(&a.driver, a.selected, clickPoint)
 	if err := a.clicker.start(interval, a.hold); err != nil {
 		a.setStatus(err.Error(), true)
 		return
@@ -386,6 +590,9 @@ func (a *application) handleCommand(id, notification uint16) {
 		if notification == cbnSelChange {
 			index := int32(sendMessage(a.processCombo, cbGetCurSel, 0, 0))
 			if index >= 0 && int(index) < len(a.targets) {
+				if a.pointPicker {
+					a.cancelClickPicker()
+				}
 				if a.picker {
 					a.clearPickerPreview()
 				}
@@ -400,6 +607,10 @@ func (a *application) handleCommand(id, notification uint16) {
 		if notification == bnClicked && !a.clicker.running {
 			a.togglePicker()
 		}
+	case idClickPoint:
+		if notification == bnClicked && !a.clicker.running {
+			a.toggleClickPicker()
+		}
 	case idHold:
 		if notification == bnClicked && !a.clicker.running {
 			a.hold = !a.hold
@@ -407,6 +618,9 @@ func (a *application) handleCommand(id, notification uint16) {
 		}
 	case idHotkey:
 		if notification == bnClicked && !a.clicker.running {
+			if a.pointPicker {
+				a.cancelClickPicker()
+			}
 			if a.picker {
 				a.clearPickerPreview()
 			}
@@ -423,6 +637,23 @@ func (a *application) handleCommand(id, notification uint16) {
 		if notification == bnClicked {
 			a.toggle()
 		}
+	case idClickerSettings:
+		if notification == bnClicked {
+			a.clickerSettingsExpanded = !a.clickerSettingsExpanded
+			a.updateSettingsHeaders()
+			a.layout()
+		}
+	case idPIPSettings:
+		if notification == bnClicked {
+			a.pipSettingsExpanded = !a.pipSettingsExpanded
+			a.updateSettingsHeaders()
+			a.layout()
+		}
+	case idInterval:
+		if notification == enChange {
+			a.updateSettingsHeaders()
+			procInvalidateRect.Call(a.clickerSettingsButton, 0, 1)
+		}
 	case idPIP:
 		if notification == bnClicked {
 			if a.pip.enabled {
@@ -430,10 +661,14 @@ func (a *application) handleCommand(id, notification uint16) {
 			} else {
 				a.enablePIP()
 			}
+			a.updateSettingsHeaders()
+			procInvalidateRect.Call(a.pipSettingsButton, 0, 1)
 		}
 	case idPIPSize, idPIPFPS:
 		if notification == cbnSelChange {
 			a.changePIPOptions()
+			a.updateSettingsHeaders()
+			procInvalidateRect.Call(a.pipSettingsButton, 0, 1)
 		}
 	}
 }
@@ -457,6 +692,7 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 		a.createControls(hwnd)
 		return 0
 	case wmSize:
+		a.hideClickPointPreview()
 		if wparam == 1 && a.tray.registered {
 			procShowWindow.Call(hwnd, swHide)
 			return 0
@@ -466,24 +702,36 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 	case wmAppTray:
 		a.handleTrayEvent(wparam, lparam)
 		return 0
+	case wmActivate:
+		if loword(wparam) == 0 {
+			a.hideClickPointPreview()
+		}
 	case wmGetMinMaxInfo:
 		info := (*minMaxInfo)(unsafe.Pointer(lparam))
-		info.minTrackSize = point{a.s(536), a.s(360)}
+		info.minTrackSize = point{a.s(536), a.s(450)}
 		return 0
 	case 0x0115: // WM_VSCROLL
 		a.handleScroll(loword(wparam))
 		return 0
 	case 0x020A: // WM_MOUSEWHEEL
-		a.scrollBy(-int32(int16(hiword(wparam))) * 48 / 120)
+		position := point{x: int32(int16(loword(lparam))), y: int32(int16(hiword(lparam)))}
+		procScreenToClient.Call(hwnd, uintptr(unsafe.Pointer(&position)))
+		if position.y >= a.s(settingsTop) {
+			a.scrollBy(-int32(int16(hiword(wparam))) * 48 / 120)
+		}
 		return 0
 	case wmCommand:
 		a.handleCommand(loword(wparam), hiword(wparam))
 		return 0
 	case wmAppInput:
 		next := hotkey{hotkeyKind(wparam), uint32(lparam)}
-		if a.picker {
+		if a.picker || a.pointPicker {
 			if next.kind == keyboardHotkey && next.code == vkEscape {
-				a.cancelPicker()
+				if a.pointPicker {
+					a.cancelClickPicker()
+				} else {
+					a.cancelPicker()
+				}
 			}
 			return 0
 		}
@@ -498,8 +746,15 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 	case wmAppPickTarget:
 		a.selectPickedTarget(wparam, unpackPoint(lparam))
 		return 0
+	case wmAppPickPoint:
+		a.selectPickedClickPoint(wparam, unpackPoint(lparam))
+		return 0
 	case wmAppPickReleased:
 		a.updateControls()
+		return 0
+	case wmAppClickPreviewMove:
+		a.clickPreviewMovePosted = false
+		a.updateClickPointPreview(a.clickPreviewMousePoint)
 		return 0
 	case wmAppPickHover:
 		a.updatePickerPreview(wparam)

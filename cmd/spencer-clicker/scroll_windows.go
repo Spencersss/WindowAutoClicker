@@ -2,12 +2,17 @@ package main
 
 import "unsafe"
 
-const mainContentHeight int32 = 740
+const (
+	settingsTop                   int32 = 362
+	settingsSectionHeaderHeight   int32 = 42
+	settingsSectionGap            int32 = 12
+	clickerSettingsExpandedHeight int32 = 192
+	pipSettingsExpandedHeight     int32 = 174
+)
 
 var (
 	procSetScrollInfo   = user32.NewProc("SetScrollInfo")
 	procGetScrollInfo   = user32.NewProc("GetScrollInfo")
-	procSetViewportOrg  = gdi32.NewProc("SetViewportOrgEx")
 	procIsChild         = user32.NewProc("IsChild")
 	procGetWindowRect   = user32.NewProc("GetWindowRect")
 	procMapWindowPoints = user32.NewProc("MapWindowPoints")
@@ -20,12 +25,40 @@ type scrollInfo struct {
 	pos, track int32
 }
 
-func clampScroll(pos, page int32) int32 { return max(0, min(pos, mainContentHeight-page)) }
+func clickerSettingsHeight(expanded bool) int32 {
+	if expanded {
+		return clickerSettingsExpandedHeight
+	}
+	return settingsSectionHeaderHeight
+}
 
-func (a *application) scrollBy(delta int32) {
+func pipSettingsHeight(expanded bool) int32 {
+	if expanded {
+		return pipSettingsExpandedHeight
+	}
+	return settingsSectionHeaderHeight
+}
+
+func settingsContentHeight(clickerExpanded, pipExpanded bool) int32 {
+	return clickerSettingsHeight(clickerExpanded) + settingsSectionGap + pipSettingsHeight(pipExpanded)
+}
+
+func clampScroll(pos, page, contentHeight int32) int32 {
+	return max(0, min(pos, max(0, contentHeight-page)))
+}
+
+func (a *application) settingsViewportPage() int32 {
 	var bounds rect
 	getClientRect(a.hwnd, &bounds)
-	next := clampScroll(a.scroll+delta, bounds.bottom*96/a.dpi)
+	return max(1, bounds.bottom*96/a.dpi-settingsTop)
+}
+
+func (a *application) settingsContentHeight() int32 {
+	return settingsContentHeight(a.clickerSettingsExpanded, a.pipSettingsExpanded)
+}
+
+func (a *application) scrollBy(delta int32) {
+	next := clampScroll(a.scroll+delta, a.settingsViewportPage(), a.settingsContentHeight())
 	if next != a.scroll {
 		a.scroll = next
 		a.layout()
@@ -33,9 +66,7 @@ func (a *application) scrollBy(delta int32) {
 }
 
 func (a *application) handleScroll(code uint16) {
-	var bounds rect
-	getClientRect(a.hwnd, &bounds)
-	page := bounds.bottom * 96 / a.dpi
+	page := a.settingsViewportPage()
 	switch code {
 	case 0:
 		a.scrollBy(-24)
@@ -50,25 +81,68 @@ func (a *application) handleScroll(code uint16) {
 		procGetScrollInfo.Call(a.hwnd, 1, uintptr(unsafe.Pointer(&info)))
 		a.scrollBy(info.track - a.scroll)
 	case 6:
-		a.scrollBy(-mainContentHeight)
+		a.scrollBy(-a.settingsContentHeight())
 	case 7:
-		a.scrollBy(mainContentHeight)
+		a.scrollBy(a.settingsContentHeight())
 	}
 }
 
-// Tab navigation reveals offscreen controls instead of moving focus invisibly.
 func (a *application) revealFocusedControl() {
 	focus, _, _ := procGetFocus.Call()
 	if child, _, _ := procIsChild.Call(a.hwnd, focus); child == 0 {
 		return
 	}
-	var bounds, client rect
-	procGetWindowRect.Call(focus, uintptr(unsafe.Pointer(&bounds)))
-	procMapWindowPoints.Call(0, a.hwnd, uintptr(unsafe.Pointer(&bounds)), 2)
-	getClientRect(a.hwnd, &client)
-	if bounds.top < 0 {
-		a.scrollBy(bounds.top*96/a.dpi - 8)
-	} else if bounds.bottom > client.bottom {
-		a.scrollBy((bounds.bottom-client.bottom)*96/a.dpi + 8)
+	control := a.settingsControl(focus)
+	if control == 0 {
+		return
+	}
+	contentTop, height := a.settingsControlPosition(control)
+	screenTop := contentTop - a.scroll
+	page := a.settingsViewportPage()
+	if screenTop < settingsTop {
+		a.scrollBy(screenTop - settingsTop - 8)
+	} else if screenTop+height > settingsTop+page {
+		a.scrollBy(screenTop + height - settingsTop - page + 8)
+	}
+}
+
+func (a *application) settingsControl(hwnd uintptr) uintptr {
+	controls := []uintptr{
+		a.clickerSettingsButton, a.intervalEdit, a.holdButton, a.hotkeyButton,
+		a.pipSettingsButton, a.pipButton, a.pipSizeCombo, a.pipFPSCombo,
+	}
+	for _, control := range controls {
+		if hwnd == control {
+			return control
+		}
+		if control != 0 {
+			if child, _, _ := procIsChild.Call(control, hwnd); child != 0 {
+				return control
+			}
+		}
+	}
+	return 0
+}
+
+func (a *application) settingsControlPosition(hwnd uintptr) (int32, int32) {
+	clickerTop := settingsTop
+	pipTop := clickerTop + clickerSettingsHeight(a.clickerSettingsExpanded) + settingsSectionGap
+	switch hwnd {
+	case a.clickerSettingsButton:
+		return clickerTop, settingsSectionHeaderHeight
+	case a.intervalEdit:
+		return clickerTop + 52, 36
+	case a.holdButton:
+		return clickerTop + 98, 36
+	case a.hotkeyButton:
+		return clickerTop + 144, 36
+	case a.pipSettingsButton:
+		return pipTop, settingsSectionHeaderHeight
+	case a.pipButton:
+		return pipTop + 52, 36
+	case a.pipSizeCombo, a.pipFPSCombo:
+		return pipTop + 120, 36
+	default:
+		return 0, 0
 	}
 }

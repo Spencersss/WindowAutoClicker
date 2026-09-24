@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -84,6 +85,25 @@ func TestPIPDefaultsAndOptionsWhileClickerRuns(t *testing.T) {
 		if enabled, _, _ := isEnabled.Call(hwnd); enabled == 0 {
 			t.Fatalf("PiP control %x became disabled while clicker was running", hwnd)
 		}
+	}
+}
+
+func TestPIPSettingsSummaryTracksStopOutsideCommand(t *testing.T) {
+	runtime.LockOSThread()
+	t.Cleanup(runtime.UnlockOSThread)
+	a := newPIPTestApplication(t)
+
+	a.pip.enabled = true
+	a.syncPIPButton()
+	if got := windowText(a.pipSettingsButton); !strings.Contains(got, ", On,") {
+		t.Fatalf("PiP settings header after enabling = %q, want On summary", got)
+	}
+
+	// stopPIP is also called by timer/error and window-close paths, outside
+	// WM_COMMAND. Its shared synchronization helper must refresh the summary.
+	a.stopPIP()
+	if got := windowText(a.pipSettingsButton); !strings.Contains(got, ", Off,") {
+		t.Fatalf("PiP settings header after stopping = %q, want Off summary", got)
 	}
 }
 

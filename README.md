@@ -109,6 +109,10 @@ Requires Go 1.25 or newer on Windows x64. From this directory:
 go build -buildvcs=false -trimpath -ldflags '-s -w -H=windowsgui' -o dist/spencer-clicker.exe ./cmd/spencer-clicker
 ```
 
+The build script verifies the PE subsystem before publishing and refuses to
+replace an output unless it is a Windows GUI executable. This prevents a default
+Go console build from becoming the clicker binary.
+
 The included `cmd/spencer-clicker/resource_windows_amd64.syso` embeds
 `cmd/spencer-clicker/app.ico` as the executable's Windows icon and includes
 the manifest for DPI awareness, Windows compatibility, standard privileges, and

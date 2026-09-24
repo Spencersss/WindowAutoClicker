@@ -76,15 +76,18 @@ func (a *application) enablePIP() {
 }
 
 func (a *application) syncPIPButton() {
-	if a.pipButton == 0 {
-		return
+	if a.pipButton != 0 {
+		label := "Picture-in-picture: Off"
+		if a.pip.enabled {
+			label = "Picture-in-picture: On"
+		}
+		setWindowText(a.pipButton, label)
+		procInvalidateRect.Call(a.pipButton, 0, 0)
 	}
-	label := "Picture-in-picture: Off"
-	if a.pip.enabled {
-		label = "Picture-in-picture: On"
+	a.updateSettingsHeaders()
+	if a.pipSettingsButton != 0 {
+		procInvalidateRect.Call(a.pipSettingsButton, 0, 0)
 	}
-	setWindowText(a.pipButton, label)
-	procInvalidateRect.Call(a.pipButton, 0, 0)
 }
 
 func (a *application) changePIPOptions() {

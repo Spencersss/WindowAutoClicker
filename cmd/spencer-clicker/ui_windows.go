@@ -6,13 +6,16 @@ import (
 )
 
 var (
-	colorBG     = rgb(17, 21, 25)
-	colorField  = rgb(28, 34, 40)
-	colorBorder = rgb(47, 58, 64)
-	colorText   = rgb(224, 232, 229)
-	colorMuted  = rgb(135, 151, 149)
-	colorGreen  = rgb(129, 224, 171)
-	colorRed    = rgb(245, 157, 151)
+	procSaveDC            = gdi32.NewProc("SaveDC")
+	procRestoreDC         = gdi32.NewProc("RestoreDC")
+	procIntersectClipRect = gdi32.NewProc("IntersectClipRect")
+	colorBG               = rgb(17, 21, 25)
+	colorField            = rgb(28, 34, 40)
+	colorBorder           = rgb(47, 58, 64)
+	colorText             = rgb(224, 232, 229)
+	colorMuted            = rgb(135, 151, 149)
+	colorGreen            = rgb(129, 224, 171)
+	colorRed              = rgb(245, 157, 151)
 )
 
 func (a *application) makeFonts() {
@@ -30,7 +33,7 @@ func (a *application) makeFonts() {
 }
 
 func (a *application) applyFonts() {
-	for _, hwnd := range []uintptr{a.processCombo, a.pickerButton, a.intervalEdit, a.holdButton, a.hotkeyButton, a.toggleButton, a.pipButton, a.pipSizeCombo, a.pipFPSCombo} {
+	for _, hwnd := range []uintptr{a.processCombo, a.pickerButton, a.clickPointButton, a.intervalEdit, a.holdButton, a.hotkeyButton, a.toggleButton, a.clickerSettingsButton, a.pipSettingsButton, a.pipButton, a.pipSizeCombo, a.pipFPSCombo} {
 		if hwnd != 0 {
 			sendMessage(hwnd, wmSetFont, a.font, 1)
 		}
@@ -92,46 +95,50 @@ func (a *application) paintMain(hwnd uintptr) {
 	var bounds rect
 	getClientRect(hwnd, &bounds)
 	procFillRect.Call(hdc, uintptr(unsafe.Pointer(&bounds)), a.bgBrush)
-	w, h := bounds.right*96/a.dpi, max(mainContentHeight, bounds.bottom*96/a.dpi)
-	procSetViewportOrg.Call(hdc, 0, uintptr(-a.s(a.scroll)), 0)
+	w := bounds.right * 96 / a.dpi
 	label := func(text string, x, y, width, height int32, font, color uintptr) {
 		a.text(hdc, text, a.box(x, y, width, height), font, color, dtLeft)
 	}
+
+	// Fixed essentials: target, click point, start/stop, and status.
 	label("spencer / clicker", 28, 24, w-56, 36, a.titleFont, colorText)
 	label("A little less clicking.", 28, 64, w-56, 22, a.smallFont, colorMuted)
 	fill(hdc, a.box(28, 98, w-56, 1), colorBorder)
 	label("TARGET WINDOW", 28, 110, w-56, 20, a.smallFont, colorMuted)
-	label("Clicks the center, even when unfocused.", 28, 177, w-56, 24, a.smallFont, colorMuted)
-	fill(hdc, a.box(28, 213, w-56, 1), colorBorder)
-	label("Click interval", 28, 237, w-235, 24, a.font, colorText)
-	label("Delay between clicks / min. 20 ms", 28, 266, w-210, 22, a.smallFont, colorMuted)
-	roundBox(hdc, a.box(w-186, 235, 158, 42), colorField, colorBorder, a.s(8))
-	label("ms", w-58, 243, 25, 26, a.smallFont, colorMuted)
-	label("Hold left click", 28, 310, w-218, 24, a.font, colorText)
-	label("One press, held until you stop.", 28, 339, w-205, 22, a.smallFont, colorMuted)
-	label("Toggle hotkey", 28, 386, w-255, 24, a.font, colorText)
-	label("Keyboard or mouse button", 28, 415, w-245, 22, a.smallFont, colorMuted)
-	fill(hdc, a.box(28, 449, w-56, 1), colorBorder)
-	label("Picture-in-picture", 28, 466, w-200, 24, a.font, colorText)
-	label("Optional preview / Windows 11 24H2+", 28, 502, w-56, 22, a.smallFont, colorMuted)
-	label("MAX. PREVIEW SIZE", 28, 527, 230, 20, a.smallFont, colorMuted)
-	label("REFRESH LIMIT", w-198, 527, 170, 20, a.smallFont, colorMuted)
-	fill(hdc, a.box(28, h-141, w-56, 1), colorBorder)
+	label("Client area: "+a.clickPointDescription(), 200, 189, w-228, 36, a.smallFont, colorMuted)
+	fill(hdc, a.box(28, 237, w-56, 1), colorBorder)
 	statusColor := colorMuted
 	if a.statusError {
 		statusColor = colorRed
-	} else if a.clicker.running {
+	} else if a.clicker.running || a.clicker.pressed {
 		statusColor = colorGreen
 	}
-	label(a.status, 28, h-134, w-56, 28, a.smallFont, statusColor)
-	dot := colorMuted
-	state := "IDLE"
-	if a.clicker.running {
-		dot, state = colorGreen, "RUNNING"
+	circle(hdc, a.box(29, 312, 8, 8), statusColor, statusColor)
+	label(a.status, 44, 303, w-72, 24, a.smallFont, statusColor)
+	fill(hdc, a.box(28, 335, w-56, 1), colorBorder)
+	label("SETTINGS", 28, 340, w-56, 18, a.smallFont, colorMuted)
+
+	// Clip scrolling captions to the settings viewport so they never paint
+	// over the fixed controls, even while a section header scrolls past.
+	saveDC, _, _ := procSaveDC.Call(hdc)
+	clip := a.box(0, settingsTop, w, bounds.bottom*96/a.dpi)
+	procIntersectClipRect.Call(hdc, uintptr(clip.left), uintptr(clip.top), uintptr(clip.right), uintptr(clip.bottom))
+	clickerTop := settingsTop - a.scroll
+	pipTop := settingsTop + clickerSettingsHeight(a.clickerSettingsExpanded) + settingsSectionGap - a.scroll
+	if a.clickerSettingsExpanded {
+		label("Click interval", 28, clickerTop+52, w-205, 36, a.font, colorText)
+		label("Hold left click", 28, clickerTop+98, w-205, 36, a.font, colorText)
+		label("Toggle hotkey", 28, clickerTop+144, w-205, 36, a.font, colorText)
 	}
-	circle(hdc, a.box(29, h-29, 8, 8), dot, dot)
-	label(state, 46, h-36, 100, 22, a.smallFont, dot)
-	a.text(hdc, "LEFT BUTTON  /  BACKGROUND", a.box(158, h-36, w-186, 22), a.smallFont, colorMuted, 2)
+	if a.pipSettingsExpanded {
+		label("Live preview", 28, pipTop+52, w-205, 36, a.font, colorText)
+		columnWidth := (w - 68) / 2
+		label("MAX. PREVIEW SIZE", 28, pipTop+98, columnWidth, 18, a.smallFont, colorMuted)
+		label("REFRESH RATE", 40+columnWidth, pipTop+98, columnWidth, 18, a.smallFont, colorMuted)
+	}
+	if saveDC != 0 {
+		procRestoreDC.Call(hdc, saveDC)
+	}
 }
 
 func drawWindowSelector(hdc uintptr, bounds rect, color uintptr) {
@@ -178,7 +185,44 @@ func drawWindowSelector(hdc uintptr, bounds rect, color uintptr) {
 	procDeleteObject.Call(holePen)
 	procDeleteObject.Call(hole)
 }
+
+func shouldDrawOwnerFocusCue(itemState uint32) bool {
+	return itemState&odsFocus != 0 && itemState&odsNoFocusRect == 0
+}
+
 func (a *application) drawItem(item *drawItemStruct) {
+	if item.ctlID == idClickerSettings || item.ctlID == idPIPSettings {
+		fill(item.hdc, item.rcItem, colorBG)
+		background, border := colorField, colorBorder
+		if item.itemState&odsSelected != 0 {
+			border = colorText
+		}
+		roundBox(item.hdc, item.rcItem, background, border, a.s(8))
+		mainText, summary, expanded := "Clicker settings", a.clickerSettingsSummary(), a.clickerSettingsExpanded
+		if item.ctlID == idPIPSettings {
+			mainText, summary, expanded = "Picture-in-picture", a.pipSettingsSummary(), a.pipSettingsExpanded
+		}
+		mainBox := item.rcItem
+		mainBox.left += a.s(12)
+		mainBox.right = mainBox.left + a.s(190)
+		a.text(item.hdc, mainText, mainBox, a.font, colorText, dtLeft)
+		summaryBox := item.rcItem
+		summaryBox.left += a.s(204)
+		summaryBox.right -= a.s(34)
+		a.text(item.hdc, summary, summaryBox, a.smallFont, colorMuted, 2)
+		arrowBox := item.rcItem
+		arrowBox.left = arrowBox.right - a.s(30)
+		a.text(item.hdc, map[bool]string{true: "-", false: "+"}[expanded], arrowBox, a.font, colorGreen, dtCenter)
+		if shouldDrawOwnerFocusCue(item.itemState) {
+			focusBox := item.rcItem
+			focusBox.left += a.s(4)
+			focusBox.right -= a.s(4)
+			focusBox.top += a.s(4)
+			focusBox.bottom -= a.s(4)
+			procDrawFocusRect.Call(item.hdc, uintptr(unsafe.Pointer(&focusBox)))
+		}
+		return
+	}
 	if item.ctlID == idPIPSize || item.ctlID == idPIPFPS {
 		text := ""
 		index := int(item.itemID)
@@ -218,7 +262,7 @@ func (a *application) drawItem(item *drawItemStruct) {
 		iconBox.right = iconBox.left + iconSize
 		iconBox.bottom = iconBox.top + iconSize
 		drawWindowSelector(item.hdc, iconBox, foreground)
-		if item.itemState&odsFocus != 0 {
+		if shouldDrawOwnerFocusCue(item.itemState) {
 			box := item.rcItem
 			box.left += a.s(4)
 			box.right -= a.s(4)
@@ -255,6 +299,11 @@ func (a *application) drawItem(item *drawItemStruct) {
 	background, foreground, border := colorField, colorText, colorBorder
 	text := ""
 	switch item.ctlID {
+	case idClickPoint:
+		text = "CHOOSE CLICK"
+		if a.pointPicker {
+			text, background, foreground = "CLICK A SPOT", rgb(32, 66, 49), colorGreen
+		}
 	case idPIP:
 		text = "OFF"
 		if a.pip.enabled {
@@ -288,7 +337,7 @@ func (a *application) drawItem(item *drawItemStruct) {
 	box.left += a.s(8)
 	box.right -= a.s(8)
 	a.text(item.hdc, text, box, a.font, foreground, dtCenter)
-	if item.itemState&odsFocus != 0 {
+	if shouldDrawOwnerFocusCue(item.itemState) {
 		box.top += a.s(4)
 		box.bottom -= a.s(4)
 		procDrawFocusRect.Call(item.hdc, uintptr(unsafe.Pointer(&box)))
