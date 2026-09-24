@@ -104,7 +104,7 @@ func TestNativeDelivery(t *testing.T) {
 	defer runtime.UnlockOSThread()
 	hwnd := makeFixture(t, false)
 	defer procDestroyWindow.Call(hwnd)
-	d := &nativeDriver{owner: hwnd, target: targetWindow{hwnd: hwnd, pid: windowPID(hwnd)}, coords: 150<<16 | 230}
+	d := &nativeDriver{owner: hwnd, target: targetWindow{hwnd: hwnd, pid: windowPID(hwnd)}, coords: 150<<16 | 230, rootCoords: 150<<16 | 230}
 	c := &clicker{driver: d}
 	fixture.engine, fixture.driver = c, d
 	if err := c.start(50, false); err != nil {

@@ -111,9 +111,11 @@ const (
 	swShow           = 5
 	swShowNoActivate = 4
 
-	gwOwner    = 4
-	gaRoot     = 2
-	gwlExStyle = -20
+	gwOwner          = 4
+	gaRoot           = 2
+	cwpSkipDisabled  = 0x0002
+	cwpSkipInvisible = 0x0001
+	gwlExStyle       = -20
 
 	colorWindow = 5
 	transparent = 1
@@ -231,6 +233,7 @@ var (
 	procIsWindow                      = user32.NewProc("IsWindow")
 	procGetWindow                     = user32.NewProc("GetWindow")
 	procWindowFromPoint               = user32.NewProc("WindowFromPoint")
+	procChildWindowFromPointEx        = user32.NewProc("ChildWindowFromPointEx")
 	procGetAncestor                   = user32.NewProc("GetAncestor")
 	procClientToScreen                = user32.NewProc("ClientToScreen")
 	procScreenToClient                = user32.NewProc("ScreenToClient")

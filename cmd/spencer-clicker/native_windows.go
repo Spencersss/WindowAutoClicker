@@ -301,7 +301,22 @@ func pickInputAt(screen point) (targetWindow, uintptr, bool) {
 	if !ok || windowPID(hwnd) != target.pid || (hwnd != root && !isChildWindow(root, hwnd)) {
 		return targetWindow{}, 0, false
 	}
-	return target, hwnd, true
+
+	// WindowFromPoint may return the root when a child reports HTTRANSPARENT.
+	// Descend through visible, enabled children at the same screen point.
+	inputHwnd := root
+	for depth := 0; depth < 32; depth++ {
+		clientPoint := screen
+		if converted, _, _ := procScreenToClient.Call(inputHwnd, uintptr(unsafe.Pointer(&clientPoint))); converted == 0 {
+			break
+		}
+		child, _, _ := procChildWindowFromPointEx.Call(inputHwnd, packPoint(clientPoint), cwpSkipDisabled|cwpSkipInvisible)
+		if child == 0 || child == inputHwnd || windowPID(child) != target.pid || !isChildWindow(root, child) {
+			break
+		}
+		inputHwnd = child
+	}
+	return target, inputHwnd, true
 }
 
 func inputWindowBelongsTo(hwnd uintptr, target targetWindow) bool {
