@@ -3,7 +3,7 @@ package main
 import "unsafe"
 
 const (
-	settingsTop                   int32 = 350
+	settingsTop                   int32 = 362
 	settingsSectionHeaderHeight   int32 = 42
 	settingsSectionGap            int32 = 12
 	clickerSettingsExpandedHeight int32 = 192

@@ -105,18 +105,18 @@ func (a *application) paintMain(hwnd uintptr) {
 	label("A little less clicking.", 28, 64, w-56, 22, a.smallFont, colorMuted)
 	fill(hdc, a.box(28, 98, w-56, 1), colorBorder)
 	label("TARGET WINDOW", 28, 110, w-56, 20, a.smallFont, colorMuted)
-	label("Client area: "+a.clickPointDescription(), 200, 177, w-228, 36, a.smallFont, colorMuted)
-	fill(hdc, a.box(28, 225, w-56, 1), colorBorder)
+	label("Client area: "+a.clickPointDescription(), 200, 189, w-228, 36, a.smallFont, colorMuted)
+	fill(hdc, a.box(28, 237, w-56, 1), colorBorder)
 	statusColor := colorMuted
 	if a.statusError {
 		statusColor = colorRed
 	} else if a.clicker.running || a.clicker.pressed {
 		statusColor = colorGreen
 	}
-	circle(hdc, a.box(29, 300, 8, 8), statusColor, statusColor)
-	label(a.status, 44, 291, w-72, 24, a.smallFont, statusColor)
-	fill(hdc, a.box(28, 323, w-56, 1), colorBorder)
-	label("SETTINGS", 28, 328, w-56, 18, a.smallFont, colorMuted)
+	circle(hdc, a.box(29, 312, 8, 8), statusColor, statusColor)
+	label(a.status, 44, 303, w-72, 24, a.smallFont, statusColor)
+	fill(hdc, a.box(28, 335, w-56, 1), colorBorder)
+	label("SETTINGS", 28, 340, w-56, 18, a.smallFont, colorMuted)
 
 	// Clip scrolling captions to the settings viewport so they never paint
 	// over the fixed controls, even while a section header scrolls past.
@@ -185,6 +185,11 @@ func drawWindowSelector(hdc uintptr, bounds rect, color uintptr) {
 	procDeleteObject.Call(holePen)
 	procDeleteObject.Call(hole)
 }
+
+func shouldDrawOwnerFocusCue(itemState uint32) bool {
+	return itemState&odsFocus != 0 && itemState&odsNoFocusRect == 0
+}
+
 func (a *application) drawItem(item *drawItemStruct) {
 	if item.ctlID == idClickerSettings || item.ctlID == idPIPSettings {
 		fill(item.hdc, item.rcItem, colorBG)
@@ -208,7 +213,7 @@ func (a *application) drawItem(item *drawItemStruct) {
 		arrowBox := item.rcItem
 		arrowBox.left = arrowBox.right - a.s(30)
 		a.text(item.hdc, map[bool]string{true: "-", false: "+"}[expanded], arrowBox, a.font, colorGreen, dtCenter)
-		if item.itemState&odsFocus != 0 {
+		if shouldDrawOwnerFocusCue(item.itemState) {
 			focusBox := item.rcItem
 			focusBox.left += a.s(4)
 			focusBox.right -= a.s(4)
@@ -257,7 +262,7 @@ func (a *application) drawItem(item *drawItemStruct) {
 		iconBox.right = iconBox.left + iconSize
 		iconBox.bottom = iconBox.top + iconSize
 		drawWindowSelector(item.hdc, iconBox, foreground)
-		if item.itemState&odsFocus != 0 {
+		if shouldDrawOwnerFocusCue(item.itemState) {
 			box := item.rcItem
 			box.left += a.s(4)
 			box.right -= a.s(4)
@@ -332,7 +337,7 @@ func (a *application) drawItem(item *drawItemStruct) {
 	box.left += a.s(8)
 	box.right -= a.s(8)
 	a.text(item.hdc, text, box, a.font, foreground, dtCenter)
-	if item.itemState&odsFocus != 0 {
+	if shouldDrawOwnerFocusCue(item.itemState) {
 		box.top += a.s(4)
 		box.bottom -= a.s(4)
 		procDrawFocusRect.Call(item.hdc, uintptr(unsafe.Pointer(&box)))

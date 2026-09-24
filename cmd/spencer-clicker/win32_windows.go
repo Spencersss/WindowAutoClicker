@@ -137,9 +137,17 @@ const (
 	dtSingleLine  = 0x0020
 	dtEndEllipsis = 0x8000
 
-	odsSelected = 0x0001
-	odsDisabled = 0x0004
-	odsFocus    = 0x0010
+	odsSelected    = 0x0001
+	odsDisabled    = 0x0004
+	odsFocus       = 0x0010
+	odsNoFocusRect = 0x0200
+
+	rdwInvalidate = 0x0001
+	rdwNoErase    = 0x0020
+	rdwFrame      = 0x0400
+
+	swpNoRedraw   = 0x0008
+	swpHideWindow = 0x0080
 
 	whKeyboardLL = 13
 	whMouseLL    = 14
@@ -293,6 +301,10 @@ var (
 	procGetSystemMetrics              = user32.NewProc("GetSystemMetrics")
 	procSystemParametersInfo          = user32.NewProc("SystemParametersInfoW")
 	procSetWindowPos                  = user32.NewProc("SetWindowPos")
+	procBeginDeferWindowPos           = user32.NewProc("BeginDeferWindowPos")
+	procDeferWindowPos                = user32.NewProc("DeferWindowPos")
+	procEndDeferWindowPos             = user32.NewProc("EndDeferWindowPos")
+	procRedrawWindow                  = user32.NewProc("RedrawWindow")
 	procDestroyWindow                 = user32.NewProc("DestroyWindow")
 	procSetForegroundWindow           = user32.NewProc("SetForegroundWindow")
 	procMessageBox                    = user32.NewProc("MessageBoxW")

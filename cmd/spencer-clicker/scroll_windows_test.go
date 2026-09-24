@@ -128,3 +128,49 @@ func TestPIPDPIIndependentOfMainWindow(t *testing.T) {
 		t.Fatal("preview DPI did not scale header independently of bitmap size")
 	}
 }
+
+func TestTargetAndChooseClickHaveGapAtSupportedDPI(t *testing.T) {
+	for _, dpi := range []int32{96, 144} {
+		a := newApplication()
+		a.dpi = dpi
+		gap := a.s(chooseClickTop) - (a.s(targetControlTop) + a.s(targetControlHeight))
+		if want := a.s(18); gap < want {
+			t.Fatalf("%d DPI: target to Choose Click gap is %d pixels, want at least %d", dpi, gap, want)
+		}
+	}
+}
+
+func TestOwnerDrawFocusCueFollowsWindowsUIState(t *testing.T) {
+	if shouldDrawOwnerFocusCue(odsFocus | odsNoFocusRect) {
+		t.Fatal("owner-drawn control showed a mouse focus rectangle despite ODS_NOFOCUSRECT")
+	}
+	if !shouldDrawOwnerFocusCue(odsFocus) {
+		t.Fatal("owner-drawn control hid the keyboard focus cue")
+	}
+	if shouldDrawOwnerFocusCue(0) {
+		t.Fatal("owner-drawn control showed a focus cue without focus")
+	}
+}
+
+func TestDiffChildPlacementsSkipsUnchangedChildren(t *testing.T) {
+	previous := []childPlacement{
+		{hwnd: 1, x: 10, y: 20, width: 100, height: 30, visible: true},
+		{hwnd: 2, x: 40, y: 50, width: 60, height: 20, visible: true},
+	}
+	current := []childPlacement{
+		previous[0],
+		{hwnd: 2, x: 40, y: 80, width: 60, height: 20, visible: true},
+		{hwnd: 3, x: 0, y: 0, width: 12, height: 12, visible: false},
+	}
+
+	changes := diffChildPlacements(previous, current)
+	if len(changes) != 2 {
+		t.Fatalf("got %d placement changes, want 2: %+v", len(changes), changes)
+	}
+	if changes[0].current.hwnd != 2 || !changes[0].hasPrevious || changes[0].previous.y != 50 || changes[0].current.y != 80 {
+		t.Fatalf("moved child did not retain its prior bounds: %+v", changes[0])
+	}
+	if changes[1].current.hwnd != 3 || changes[1].hasPrevious {
+		t.Fatalf("new child was not reported as an initial placement: %+v", changes[1])
+	}
+}

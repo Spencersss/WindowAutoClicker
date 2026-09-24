@@ -63,6 +63,7 @@ type application struct {
 	clicker                                                                                            clicker
 	pip                                                                                                pictureInPicture
 	pipButton, pipSizeCombo, pipFPSCombo                                                               uintptr
+	lastLayout                                                                                         layoutSnapshot
 }
 
 func newApplication() *application {
@@ -226,6 +227,47 @@ func (a *application) createControls(hwnd uintptr) {
 	procDwmSetWindowAttribute.Call(hwnd, 35, uintptr(unsafe.Pointer(&caption)), unsafe.Sizeof(caption))
 }
 
+const (
+	targetControlTop int32 = 134
+	chooseClickTop   int32 = 189
+)
+
+type childPlacement struct {
+	hwnd                uintptr
+	x, y, width, height int32
+	visible             bool
+}
+
+type placementChange struct {
+	previous, current childPlacement
+	hasPrevious       bool
+}
+
+type layoutSnapshot struct {
+	children                  []childPlacement
+	scroll, contentHeight     int32
+	clientWidth, clientHeight int32
+	dpi                       int32
+	valid                     bool
+}
+
+func diffChildPlacements(previous, current []childPlacement) []placementChange {
+	previousByWindow := make(map[uintptr]childPlacement, len(previous))
+	for _, item := range previous {
+		previousByWindow[item.hwnd] = item
+	}
+
+	changes := make([]placementChange, 0, len(current))
+	for _, item := range current {
+		old, found := previousByWindow[item.hwnd]
+		if found && old == item {
+			continue
+		}
+		changes = append(changes, placementChange{previous: old, current: item, hasPrevious: found})
+	}
+	return changes
+}
+
 func (a *application) layout() {
 	if a.toggleButton == 0 || a.layingOut {
 		return
@@ -241,63 +283,117 @@ func (a *application) layout() {
 	procSetScrollInfo.Call(a.hwnd, 1, uintptr(unsafe.Pointer(&info)), 1)
 	getClientRect(a.hwnd, &bounds)
 	w := bounds.right * 96 / a.dpi
-	move := func(hwnd uintptr, x, y, width, height int32) {
-		procMoveWindow.Call(hwnd, uintptr(a.s(x)), uintptr(a.s(y)), uintptr(a.s(width)), uintptr(a.s(height)), 1)
+	placements := make([]childPlacement, 0, 12)
+	place := func(hwnd uintptr, x, y, width, height int32, visible bool) {
+		if hwnd != 0 {
+			placements = append(placements, childPlacement{hwnd: hwnd, x: x, y: y, width: width, height: height, visible: visible})
+		}
 	}
-	moveSettings := func(hwnd uintptr, x, y, width, height int32) {
+	placeSettings := func(hwnd uintptr, x, y, width, height int32, visible bool) {
 		screenY := y - a.scroll
 		if screenY < settingsTop {
 			screenY = -height - 1
 		}
-		move(hwnd, x, screenY, width, height)
+		place(hwnd, x, screenY, width, height, visible)
 	}
 
 	// The essentials remain anchored to the window while only the settings
 	// cards move with the vertical scrollbar.
-	move(a.processCombo, 28, 134, w-106, 300)
-	move(a.pickerButton, w-70, 134, 42, targetControlHeight)
-	move(a.clickPointButton, 28, 177, 156, 36)
-	move(a.toggleButton, 28, 244, w-56, 44)
+	place(a.processCombo, 28, targetControlTop, w-106, 300, true)
+	place(a.pickerButton, w-70, targetControlTop, 42, targetControlHeight, true)
+	place(a.clickPointButton, 28, chooseClickTop, 156, 36, true)
+	place(a.toggleButton, 28, 256, w-56, 44, true)
 
 	clickerTop := settingsTop
 	pipTop := clickerTop + clickerSettingsHeight(a.clickerSettingsExpanded) + settingsSectionGap
-	moveSettings(a.clickerSettingsButton, 28, clickerTop, w-56, settingsSectionHeaderHeight)
-	moveSettings(a.pipSettingsButton, 28, pipTop, w-56, settingsSectionHeaderHeight)
-	moveSettings(a.intervalEdit, w-174, clickerTop+52, 146, 36)
-	moveSettings(a.holdButton, w-158, clickerTop+98, 130, 36)
-	moveSettings(a.hotkeyButton, w-158, clickerTop+144, 130, 36)
-	moveSettings(a.pipButton, w-158, pipTop+52, 130, 36)
+	placeSettings(a.clickerSettingsButton, 28, clickerTop, w-56, settingsSectionHeaderHeight, true)
+	placeSettings(a.pipSettingsButton, 28, pipTop, w-56, settingsSectionHeaderHeight, true)
+	placeSettings(a.intervalEdit, w-174, clickerTop+52, 146, 36, a.clickerSettingsExpanded)
+	placeSettings(a.holdButton, w-158, clickerTop+98, 130, 36, a.clickerSettingsExpanded)
+	placeSettings(a.hotkeyButton, w-158, clickerTop+144, 130, 36, a.clickerSettingsExpanded)
+	placeSettings(a.pipButton, w-158, pipTop+52, 130, 36, a.pipSettingsExpanded)
 	columnWidth := (w - 68) / 2
-	moveSettings(a.pipSizeCombo, 28, pipTop+120, columnWidth, 220)
-	moveSettings(a.pipFPSCombo, 40+columnWidth, pipTop+120, columnWidth, 220)
+	placeSettings(a.pipSizeCombo, 28, pipTop+120, columnWidth, 220, a.pipSettingsExpanded)
+	placeSettings(a.pipFPSCombo, 40+columnWidth, pipTop+120, columnWidth, 220, a.pipSettingsExpanded)
 
-	a.syncSettingsVisibility()
+	previousLayout := a.lastLayout
+	previousPlacements := previousLayout.children
+	if previousLayout.valid && previousLayout.dpi != a.dpi {
+		previousPlacements = nil
+	}
+	a.applyChildPlacements(diffChildPlacements(previousPlacements, placements))
+	if !previousLayout.valid || previousLayout.clientWidth != bounds.right || previousLayout.clientHeight != bounds.bottom || previousLayout.dpi != a.dpi {
+		client := rect{right: bounds.right, bottom: bounds.bottom}
+		procInvalidateRect.Call(a.hwnd, uintptr(unsafe.Pointer(&client)), 0)
+	} else if previousLayout.scroll != a.scroll || previousLayout.contentHeight != contentHeight {
+		settings := rect{top: a.s(settingsTop), right: bounds.right, bottom: bounds.bottom}
+		procInvalidateRect.Call(a.hwnd, uintptr(unsafe.Pointer(&settings)), 0)
+	}
+	a.lastLayout = layoutSnapshot{
+		children: append([]childPlacement(nil), placements...),
+		scroll:   a.scroll, contentHeight: contentHeight,
+		clientWidth: bounds.right, clientHeight: bounds.bottom, dpi: a.dpi, valid: true,
+	}
 	a.hideClickPointPreview()
-	procInvalidateRect.Call(a.hwnd, 0, 1)
 }
 
-func (a *application) syncSettingsVisibility() {
-	visibility := []struct {
-		hwnd    uintptr
-		visible bool
-	}{
-		{a.intervalEdit, a.clickerSettingsExpanded},
-		{a.holdButton, a.clickerSettingsExpanded},
-		{a.hotkeyButton, a.clickerSettingsExpanded},
-		{a.pipButton, a.pipSettingsExpanded},
-		{a.pipSizeCombo, a.pipSettingsExpanded},
-		{a.pipFPSCombo, a.pipSettingsExpanded},
+func (a *application) applyChildPlacements(changes []placementChange) {
+	if len(changes) == 0 {
+		return
 	}
-	for _, item := range visibility {
-		if item.hwnd == 0 {
+	flagsFor := func(change placementChange) uintptr {
+		flags := uintptr(swpNoZOrder | swpNoActivate | swpNoRedraw)
+		if !change.current.visible {
+			flags |= swpHideWindow
+		} else if change.hasPrevious && !change.previous.visible {
+			flags |= swpShowWindow
+		}
+		return flags
+	}
+	applyOne := func(change placementChange) {
+		item := change.current
+		procSetWindowPos.Call(item.hwnd, 0,
+			uintptr(a.s(item.x)), uintptr(a.s(item.y)), uintptr(a.s(item.width)), uintptr(a.s(item.height)), flagsFor(change))
+	}
+
+	applied := false
+	batch, _, _ := procBeginDeferWindowPos.Call(uintptr(len(changes)))
+	if batch != 0 {
+		for _, change := range changes {
+			item := change.current
+			batch, _, _ = procDeferWindowPos.Call(batch, item.hwnd, 0,
+				uintptr(a.s(item.x)), uintptr(a.s(item.y)), uintptr(a.s(item.width)), uintptr(a.s(item.height)), flagsFor(change))
+			if batch == 0 {
+				break
+			}
+		}
+		if batch != 0 {
+			ok, _, _ := procEndDeferWindowPos.Call(batch)
+			applied = ok != 0
+		}
+	}
+	if !applied {
+		for _, change := range changes {
+			applyOne(change)
+		}
+	}
+
+	for _, change := range changes {
+		if change.hasPrevious && change.previous.visible {
+			a.invalidateExposedPlacement(change.previous)
+		}
+		if !change.current.visible {
 			continue
 		}
-		mode := uintptr(swHide)
-		if item.visible {
-			mode = swShowNoActivate
-		}
-		procShowWindow.Call(item.hwnd, mode)
+		a.invalidateExposedPlacement(change.current)
+		procRedrawWindow.Call(change.current.hwnd, 0, 0, rdwInvalidate|rdwNoErase|rdwFrame)
 	}
+}
+
+func (a *application) invalidateExposedPlacement(item childPlacement) {
+	left, top := a.s(item.x), a.s(item.y)
+	bounds := rect{left: left, top: top, right: left + a.s(item.width), bottom: top + a.s(item.height)}
+	procInvalidateRect.Call(a.hwnd, uintptr(unsafe.Pointer(&bounds)), 0)
 }
 
 func (a *application) updateSettingsHeaders() {
