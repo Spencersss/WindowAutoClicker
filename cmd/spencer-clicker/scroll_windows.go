@@ -2,7 +2,7 @@ package main
 
 import "unsafe"
 
-const mainContentHeight int32 = 740
+const mainContentHeight int32 = 800
 
 var (
 	procSetScrollInfo   = user32.NewProc("SetScrollInfo")

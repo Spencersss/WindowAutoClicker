@@ -9,11 +9,15 @@ import (
 
 // Win32 callbacks are allocated once; syscall.NewCallback keeps them for the
 // process lifetime, so creating one on every dropdown refresh would leak.
+const clickPreviewClassName = "SpencerClickerClickPreview"
+
 var (
-	mainCallback  = syscall.NewCallback(mainWindowProc)
-	enumCallback  = syscall.NewCallback(enumWindowCallback)
-	keyCallback   = syscall.NewCallback(keyboardHookProc)
-	mouseCallback = syscall.NewCallback(mouseHookProc)
+	mainCallback         = syscall.NewCallback(mainWindowProc)
+	enumCallback         = syscall.NewCallback(enumWindowCallback)
+	keyCallback          = syscall.NewCallback(keyboardHookProc)
+	mouseCallback        = syscall.NewCallback(mouseHookProc)
+	clickPreviewCallback = syscall.NewCallback(clickPreviewWindowProc)
+	clickPreviewColorKey = rgb(1, 2, 3)
 )
 
 type nativeDriver struct {
@@ -97,6 +101,12 @@ func (a *application) refreshTargets() {
 	}
 	found := false
 	for i, target := range a.targets {
+		if target.hwnd == a.selected.hwnd && target.pid == a.selected.pid && a.selected.hasInputPoint {
+			target.inputHwnd = a.selected.inputHwnd
+			target.inputPoint = a.selected.inputPoint
+			target.hasInputPoint = true
+			a.targets[i] = target
+		}
 		label := target.title
 		if counts[label] > 1 {
 			label = fmt.Sprintf("%s  [pid %d / %X]", label, target.pid, target.hwnd)
@@ -109,6 +119,8 @@ func (a *application) refreshTargets() {
 	}
 	if !found {
 		a.selected = targetWindow{}
+		a.pointPicker = false
+		a.hideClickPointPreview()
 		if a.pip.enabled {
 			a.stopPIP()
 		}
@@ -135,13 +147,13 @@ func (a *application) installHooks() error {
 }
 
 func (a *application) syncMouseHook() error {
-	needed := a.capture || a.picker || a.pickerConsumed || a.hotkey.kind == mouseHotkey
+	needed := a.capture || a.picker || a.pointPicker || a.pickerConsumed || a.hotkey.kind == mouseHotkey || a.selected.hwnd != 0
 	if !needed && a.mouseHook != 0 {
 		procUnhookWindowsHookEx.Call(a.mouseHook)
 		a.mouseHook = 0
 		a.mouseDown = [5]bool{}
 	}
-	// Keyboard-only operation does not need high-frequency mouse events.
+	// A selected target also uses mouse movement for the point-preview marker.
 	if needed && a.mouseHook == 0 {
 		var err error
 		a.mouseHook, _, err = procSetWindowsHookEx.Call(whMouseLL, mouseCallback, a.instance, 0)
@@ -174,7 +186,7 @@ func keyboardHookProc(code int32, wparam uintptr, data *kbdLLHookStruct) uintptr
 		}
 		if down && !a.keysDown[data.vkCode] {
 			a.keysDown[data.vkCode] = true
-			if a.picker && data.vkCode == vkEscape {
+			if (a.picker || a.pointPicker) && data.vkCode == vkEscape {
 				postMessage(a.hwnd, wmAppInput, uintptr(keyboardHotkey), uintptr(data.vkCode))
 				return 1
 			}
@@ -189,29 +201,43 @@ func keyboardHookProc(code int32, wparam uintptr, data *kbdLLHookStruct) uintptr
 func mouseHookProc(code int32, wparam uintptr, data *msLLHookStruct) uintptr {
 	a := activeApp
 	if code == hcAction && a != nil && data != nil {
-		if a.picker && uint32(wparam) == wmMouseMove {
-			var hovered uintptr
-			if target, ok := pickTargetAt(data.pt); ok {
-				hovered = target
-			}
-			if hovered != a.pickerHover {
-				a.pickerHover = hovered
-				postMessage(a.hwnd, wmAppPickHover, hovered, 0)
+		message := uint32(wparam)
+		if message == wmMouseMove {
+			if a.picker {
+				var hovered uintptr
+				if target, ok := pickTargetAt(data.pt); ok {
+					hovered = target
+				}
+				if hovered != a.pickerHover {
+					a.pickerHover = hovered
+					postMessage(a.hwnd, wmAppPickHover, hovered, 0)
+				}
+			} else if !a.pointPicker {
+				a.queueClickPointPreview(data.pt)
 			}
 		}
-		if a.picker && uint32(wparam) == wmLButtonDown {
+		if a.pointPicker && message == wmLButtonDown {
+			if target, inputHwnd, ok := pickInputAt(data.pt); ok && target.hwnd == a.selected.hwnd && target.pid == a.selected.pid {
+				if _, valid := clickPointInTarget(a.selected, inputHwnd, data.pt); valid {
+					a.pickerConsumed = true
+					postMessage(a.hwnd, wmAppPickPoint, inputHwnd, packPoint(data.pt))
+					return 1
+				}
+			}
+		}
+		if a.picker && message == wmLButtonDown {
 			if _, inputHwnd, ok := pickInputAt(data.pt); ok {
 				a.pickerConsumed = true
 				postMessage(a.hwnd, wmAppPickTarget, inputHwnd, packPoint(data.pt))
 				return 1
 			}
 		}
-		if uint32(wparam) == wmLButtonUp && a.pickerConsumed {
+		if message == wmLButtonUp && a.pickerConsumed {
 			a.pickerConsumed = false
 			postMessage(a.hwnd, wmAppPickReleased, 0, 0)
 			return 1
 		}
-		button, down, up := mouseEvent(uint32(wparam), data.mouseData)
+		button, down, up := mouseEvent(message, data.mouseData)
 		if button != 0 {
 			if up {
 				a.mouseDown[button] = false
@@ -330,6 +356,191 @@ func inputWindowBelongsTo(hwnd uintptr, target targetWindow) bool {
 	return root == target.hwnd && isChildWindow(target.hwnd, hwnd)
 }
 
+func targetClickPoint(target targetWindow) (point, bool, bool) {
+	if target.hwnd == 0 || !isWindow(target.hwnd) || windowPID(target.hwnd) != target.pid {
+		return point{}, false, false
+	}
+	var bounds rect
+	if !getClientRect(target.hwnd, &bounds) {
+		return point{}, false, false
+	}
+	clickPoint := point{x: bounds.right / 2, y: bounds.bottom / 2}
+	centered := true
+	if target.hasInputPoint && pointInClient(target.inputPoint, bounds) {
+		clickPoint = target.inputPoint
+		centered = false
+	}
+	return clickPoint, centered, true
+}
+
+func clickPointInTarget(target targetWindow, inputHwnd uintptr, screenPoint point) (point, bool) {
+	if !inputWindowBelongsTo(inputHwnd, target) {
+		return point{}, false
+	}
+	root, _, _ := procGetAncestor.Call(inputHwnd, gaRoot)
+	if root != target.hwnd {
+		return point{}, false
+	}
+	rootPoint := screenPoint
+	if converted, _, _ := procScreenToClient.Call(root, uintptr(unsafe.Pointer(&rootPoint))); converted == 0 {
+		return point{}, false
+	}
+	var bounds rect
+	if !getClientRect(root, &bounds) || !pointInClient(rootPoint, bounds) {
+		return point{}, false
+	}
+	return rootPoint, true
+}
+
+func configureDriverClickPoint(driver *nativeDriver, target targetWindow, clickPoint point) {
+	driver.target = target
+	driver.rootCoords = mouseCoords(clickPoint)
+	driver.inputHwnd = 0
+	driver.coords = driver.rootCoords
+	inputHwnd := target.inputHwnd
+	if !inputWindowBelongsTo(inputHwnd, target) || inputHwnd == target.hwnd {
+		return
+	}
+	screenPoint := clickPoint
+	if converted, _, _ := procClientToScreen.Call(target.hwnd, uintptr(unsafe.Pointer(&screenPoint))); converted == 0 {
+		return
+	}
+	if converted, _, _ := procScreenToClient.Call(inputHwnd, uintptr(unsafe.Pointer(&screenPoint))); converted == 0 {
+		return
+	}
+	var bounds rect
+	if !getClientRect(inputHwnd, &bounds) || !pointInClient(screenPoint, bounds) {
+		return
+	}
+	driver.inputHwnd = inputHwnd
+	driver.coords = mouseCoords(screenPoint)
+}
+
+func focusTargetForPicker(target targetWindow) error {
+	if target.hwnd == 0 || !isWindow(target.hwnd) || windowPID(target.hwnd) != target.pid {
+		return fmt.Errorf("Target closed. Select another window.")
+	}
+	if iconic, _, _ := procIsIconic.Call(target.hwnd); iconic != 0 {
+		procShowWindow.Call(target.hwnd, swRestore)
+	}
+	procSetForegroundWindow.Call(target.hwnd)
+	foreground, _, _ := procGetForegroundWindow.Call()
+	owner, _, _ := procGetAncestor.Call(foreground, gaRootOwner)
+	if foreground != target.hwnd && owner != target.hwnd {
+		return fmt.Errorf("Windows could not focus the selected application. Click its window, then choose a click point.")
+	}
+	return nil
+}
+
+func (a *application) clickPointDescription() string {
+	if a.selected.hwnd == 0 {
+		return "Select an application to set its click point."
+	}
+	p, centered, ok := targetClickPoint(a.selected)
+	if !ok {
+		return "The selected application is unavailable."
+	}
+	kind := "Selected"
+	if centered {
+		kind = "Center"
+	}
+	return fmt.Sprintf("%s  (x=%d, y=%d)", kind, p.x, p.y)
+}
+
+func (a *application) queueClickPointPreview(screen point) {
+	if a.selected.hwnd == 0 || a.clickPointButton == 0 || a.picker || a.pointPicker || a.clicker.running {
+		return
+	}
+	a.clickPreviewMousePoint = screen
+	if a.clickPreviewMovePosted {
+		return
+	}
+	a.clickPreviewMovePosted = true
+	if !postMessage(a.hwnd, wmAppClickPreviewMove, 0, 0) {
+		a.clickPreviewMovePosted = false
+	}
+}
+func (a *application) updateClickPointPreview(screen point) {
+	if a.picker || a.pointPicker || a.clicker.running || a.selected.hwnd == 0 || a.clickPointButton == 0 {
+		a.hideClickPointPreview()
+		return
+	}
+	visible, _, _ := procIsWindowVisible.Call(a.hwnd)
+	iconic, _, _ := procIsIconic.Call(a.hwnd)
+	foreground, _, _ := procGetForegroundWindow.Call()
+	foregroundOwner, _, _ := procGetAncestor.Call(foreground, gaRootOwner)
+	if visible == 0 || iconic != 0 || (foreground != a.hwnd && foregroundOwner != a.hwnd) || windowFromPoint(screen) != a.clickPointButton {
+		a.hideClickPointPreview()
+		return
+	}
+	var buttonBounds rect
+	if result, _, _ := procGetWindowRect.Call(a.clickPointButton, uintptr(unsafe.Pointer(&buttonBounds))); result == 0 || !pointInClient(screen, buttonBounds) {
+		a.hideClickPointPreview()
+		return
+	}
+	clickPoint, _, ok := targetClickPoint(a.selected)
+	if !ok {
+		a.hideClickPointPreview()
+		return
+	}
+	if converted, _, _ := procClientToScreen.Call(a.selected.hwnd, uintptr(unsafe.Pointer(&clickPoint))); converted == 0 {
+		a.hideClickPointPreview()
+		return
+	}
+	if a.clickPreviewOverlay == 0 {
+		a.clickPreviewOverlay = createWindow(wsExTopmost|wsExTransparent|wsExNoActivate|wsExToolWindow|wsExLayered,
+			clickPreviewClassName, "", wsPopup, 0, 0, 30, 30, 0, 0, a.instance)
+		if a.clickPreviewOverlay == 0 {
+			return
+		}
+		procSetLayeredWindowAttributes.Call(a.clickPreviewOverlay, clickPreviewColorKey, 0, lwaColorKey)
+	}
+	if a.clickPreviewShown && a.clickPreviewPoint == clickPoint {
+		return
+	}
+	if result, _, _ := procSetWindowPos.Call(a.clickPreviewOverlay, hwndTopmost, uintptr(clickPoint.x-15), uintptr(clickPoint.y-15), 30, 30, swpShowWindow|swpNoActivate); result != 0 {
+		a.clickPreviewShown = true
+		a.clickPreviewPoint = clickPoint
+	}
+}
+
+func (a *application) hideClickPointPreview() {
+	if a.clickPreviewOverlay != 0 && a.clickPreviewShown {
+		procShowWindow.Call(a.clickPreviewOverlay, 0)
+		a.clickPreviewShown = false
+	}
+}
+
+func clickPreviewWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintptr {
+	switch message {
+	case wmNCHitTest:
+		return htTransparent
+	case wmEraseBkgnd:
+		return 1
+	case wmPaint:
+		var ps paintStruct
+		hdc, _, _ := procBeginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
+		bounds := rect{right: 30, bottom: 30}
+		fill(hdc, bounds, clickPreviewColorKey)
+		circle(hdc, rect{left: 2, top: 2, right: 28, bottom: 28}, clickPreviewColorKey, colorRed)
+		pen, _, _ := procCreatePen.Call(0, 2, colorRed)
+		old, _, _ := procSelectObject.Call(hdc, pen)
+		procMoveToEx.Call(hdc, 15, 0, 0)
+		procLineTo.Call(hdc, 15, 8)
+		procMoveToEx.Call(hdc, 15, 21, 0)
+		procLineTo.Call(hdc, 15, 30)
+		procMoveToEx.Call(hdc, 0, 15, 0)
+		procLineTo.Call(hdc, 8, 15)
+		procMoveToEx.Call(hdc, 21, 15, 0)
+		procLineTo.Call(hdc, 30, 15)
+		procSelectObject.Call(hdc, old)
+		procDeleteObject.Call(pen)
+		circle(hdc, rect{left: 11, top: 11, right: 19, bottom: 19}, colorGreen, colorBG)
+		procEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
+		return 0
+	}
+	return defaultWindowProc(hwnd, message, wparam, lparam)
+}
 func (a *application) targetIndex(target targetWindow) int {
 	for i, candidate := range a.targets {
 		if candidate.hwnd == target.hwnd && candidate.pid == target.pid {
@@ -425,18 +636,86 @@ func (a *application) togglePicker() {
 		a.cancelPicker()
 		return
 	}
+	if a.pointPicker {
+		a.cancelClickPicker()
+	}
 	a.capture = false
+	a.hideClickPointPreview()
 	a.refreshTargets()
 	a.clearPickerPreview()
 	a.picker, a.pickerConsumed = true, false
 	a.setStatus("Click the target at the desired click point. Escape or Pick target to cancel.", false)
 	a.updateControls()
 }
+
 func (a *application) cancelPicker() {
 	a.clearPickerPreview()
 	a.picker = false
 	a.setStatus("Target picker cancelled.", false)
 	a.updateControls()
+}
+
+func (a *application) toggleClickPicker() {
+	if a.clicker.running || a.clicker.pressed {
+		return
+	}
+	if a.pointPicker {
+		a.cancelClickPicker()
+		return
+	}
+	if a.selected.hwnd == 0 {
+		a.setStatus("Select an application first.", true)
+		a.updateControls()
+		return
+	}
+	if a.picker {
+		a.clearPickerPreview()
+		a.picker = false
+	}
+	a.capture = false
+	a.hideClickPointPreview()
+	if err := focusTargetForPicker(a.selected); err != nil {
+		a.setStatus(err.Error(), true)
+		a.updateControls()
+		return
+	}
+	a.pointPicker, a.pickerConsumed = true, false
+	a.setStatus("Click a point inside "+a.selected.title+". Escape or Choose Click to cancel.", false)
+	a.updateControls()
+}
+
+func (a *application) cancelClickPicker() {
+	if !a.pointPicker {
+		return
+	}
+	a.pointPicker = false
+	a.hideClickPointPreview()
+	a.setStatus("Click-point selection cancelled.", false)
+	a.updateControls()
+}
+
+func (a *application) selectPickedClickPoint(inputHwnd uintptr, screenPoint point) bool {
+	if !a.pointPicker {
+		return false
+	}
+	rootPoint, ok := clickPointInTarget(a.selected, inputHwnd, screenPoint)
+	if !ok {
+		return false
+	}
+	a.selected.inputHwnd = inputHwnd
+	a.selected.inputPoint = rootPoint
+	a.selected.hasInputPoint = true
+	for i, candidate := range a.targets {
+		if candidate.hwnd == a.selected.hwnd && candidate.pid == a.selected.pid {
+			a.targets[i] = a.selected
+			break
+		}
+	}
+	a.pointPicker = false
+	a.hideClickPointPreview()
+	a.setStatus(fmt.Sprintf("Click point saved at x=%d, y=%d in the application client area.", rootPoint.x, rootPoint.y), false)
+	a.updateControls()
+	return true
 }
 func (a *application) selectPickedTarget(inputHwnd uintptr, screenPoint point) {
 	if !a.picker || inputHwnd == 0 || inputHwnd == a.hwnd || !isWindow(inputHwnd) {
@@ -462,6 +741,8 @@ func (a *application) selectPickedTarget(inputHwnd uintptr, screenPoint point) {
 	a.clearPickerPreview()
 	a.selected = target
 	a.picker = false
+	a.pointPicker = false
+	a.hideClickPointPreview()
 	a.refreshTargets()
 	for i, candidate := range a.targets {
 		if candidate.hwnd == target.hwnd && candidate.pid == target.pid {

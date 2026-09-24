@@ -266,6 +266,124 @@ func TestPickerConsumesValidSelectionClick(t *testing.T) {
 	}
 	mainWindowProc(a.hwnd, wmAppPickReleased, 0, 0)
 }
+func TestClickPointPickerDoesNotArmForClosedTarget(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	hwnd := makeFixture(t, false)
+	pid := windowPID(hwnd)
+	procDestroyWindow.Call(hwnd)
+
+	a := newApplication()
+	a.selected = targetWindow{hwnd: hwnd, pid: pid, title: "Closed target"}
+	activeApp = a
+	t.Cleanup(func() { activeApp = nil })
+	a.toggleClickPicker()
+	if a.pointPicker || !a.statusError || a.status != "Target closed. Select another window." {
+		t.Fatalf("closed-target picker state = active %t, error %t, status %q", a.pointPicker, a.statusError, a.status)
+	}
+}
+func TestClickPointPickerUsesSelectedApplicationOnly(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	hwnd := makeFixture(t, true)
+	defer procDestroyWindow.Call(hwnd)
+	pumpFor(20 * time.Millisecond)
+
+	a := newApplication()
+	a.pid = windowPID(hwnd) + 1
+	a.selected = targetWindow{hwnd: hwnd, pid: windowPID(hwnd), title: windowText(hwnd)}
+	a.pointPicker = true
+	activeApp = a
+	t.Cleanup(func() { activeApp = nil })
+
+	var childBounds rect
+	if ok, _, _ := procGetWindowRect.Call(fixture.label, uintptr(unsafe.Pointer(&childBounds))); ok == 0 {
+		t.Fatal("could not read selected child bounds")
+	}
+	screenPoint := point{x: (childBounds.left + childBounds.right) / 2, y: (childBounds.top + childBounds.bottom) / 2}
+	data := &msLLHookStruct{pt: screenPoint}
+	if got := mouseHookProc(hcAction, wmLButtonDown, data); got != 1 || !a.pickerConsumed {
+		t.Fatalf("point picker result = %d, consumed = %t; want 1, true", got, a.pickerConsumed)
+	}
+	if !a.selectPickedClickPoint(fixture.label, screenPoint) {
+		t.Fatal("point picker rejected the selected application")
+	}
+	want := screenPoint
+	if converted, _, _ := procScreenToClient.Call(hwnd, uintptr(unsafe.Pointer(&want))); converted == 0 {
+		t.Fatal("could not translate selected point")
+	}
+	if a.pointPicker || a.selected.hwnd != hwnd || a.selected.pid != windowPID(hwnd) || a.selected.inputHwnd != fixture.label || !a.selected.hasInputPoint || a.selected.inputPoint != want {
+		t.Fatalf("saved point changed target or coordinates: pointPicker=%t selected=%+v want point=%+v", a.pointPicker, a.selected, want)
+	}
+	if got := mouseHookProc(hcAction, wmLButtonUp, data); got != 1 || a.pickerConsumed {
+		t.Fatalf("point-picker mouse-up result = %d, consumed = %t; want 1, false", got, a.pickerConsumed)
+	}
+}
+
+func TestClickPointPickerRejectsWrongWindowAndEscapePreservesPoint(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	selectedHwnd := makeFixture(t, true)
+	defer procDestroyWindow.Call(selectedHwnd)
+	selectedChild := fixture.label
+	wrongHwnd := makeFixture(t, true)
+	defer procDestroyWindow.Call(wrongHwnd)
+	wrongChild := fixture.label
+	procSetWindowPos.Call(wrongHwnd, 0, 650, 50, 460, 300, swpShowWindow|swpNoActivate)
+	pumpFor(20 * time.Millisecond)
+
+	saved := targetWindow{hwnd: selectedHwnd, pid: windowPID(selectedHwnd), title: windowText(selectedHwnd), inputHwnd: selectedChild, inputPoint: point{71, 82}, hasInputPoint: true}
+	a := newApplication()
+	a.pid = saved.pid + 1
+	a.selected = saved
+	a.pointPicker = true
+	activeApp = a
+	t.Cleanup(func() { activeApp = nil })
+
+	var bounds rect
+	if ok, _, _ := procGetWindowRect.Call(wrongChild, uintptr(unsafe.Pointer(&bounds))); ok == 0 {
+		t.Fatal("could not read wrong child bounds")
+	}
+	screenPoint := point{x: (bounds.left + bounds.right) / 2, y: (bounds.top + bounds.bottom) / 2}
+	data := &msLLHookStruct{pt: screenPoint}
+	if got := mouseHookProc(hcAction, wmLButtonDown, data); got == 1 || a.pickerConsumed {
+		t.Fatalf("wrong-window click was consumed: result=%d, consumed=%t", got, a.pickerConsumed)
+	}
+	if a.selectPickedClickPoint(wrongChild, screenPoint) || !a.pointPicker || a.selected != saved {
+		t.Fatalf("wrong-window click changed point-picker state: active=%t selected=%+v", a.pointPicker, a.selected)
+	}
+	mainWindowProc(a.hwnd, wmAppInput, uintptr(keyboardHotkey), uintptr(vkEscape))
+	if a.pointPicker || a.selected != saved {
+		t.Fatalf("Escape changed the saved point: active=%t selected=%+v", a.pointPicker, a.selected)
+	}
+}
+
+func TestSavedClickPointMapsToChildDriverCoordinates(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	hwnd := makeFixture(t, true)
+	defer procDestroyWindow.Call(hwnd)
+	pumpFor(20 * time.Millisecond)
+
+	target := targetWindow{hwnd: hwnd, pid: windowPID(hwnd), title: windowText(hwnd), inputHwnd: fixture.label, inputPoint: point{150, 100}, hasInputPoint: true}
+	clickPoint, centered, ok := targetClickPoint(target)
+	if !ok || centered || clickPoint != target.inputPoint {
+		t.Fatalf("targetClickPoint = %+v, centered=%t, ok=%t", clickPoint, centered, ok)
+	}
+	wantRoot := mouseCoords(clickPoint)
+	childPoint := clickPoint
+	if converted, _, _ := procClientToScreen.Call(hwnd, uintptr(unsafe.Pointer(&childPoint))); converted == 0 {
+		t.Fatal("could not convert saved root coordinates to screen")
+	}
+	if converted, _, _ := procScreenToClient.Call(fixture.label, uintptr(unsafe.Pointer(&childPoint))); converted == 0 {
+		t.Fatal("could not convert screen coordinates to child")
+	}
+	driver := &nativeDriver{}
+	configureDriverClickPoint(driver, target, clickPoint)
+	if driver.target.hwnd != hwnd || driver.rootCoords != wantRoot || driver.inputHwnd != fixture.label || driver.coords != mouseCoords(childPoint) {
+		t.Fatalf("driver coordinates = target %x, root %x, input %x, coords %x; want root %x, input %x, coords %x", driver.target.hwnd, driver.rootCoords, driver.inputHwnd, driver.coords, wantRoot, fixture.label, mouseCoords(childPoint))
+	}
+}
 func TestPickerStateAndSelection(t *testing.T) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -326,6 +444,29 @@ func TestApplicationLifecycle(t *testing.T) {
 	a.driver.owner = a.hwnd
 	a.targets = []targetWindow{{hwnd: target, pid: windowPID(target), title: "Isolated receiver"}}
 	sendMessage(a.processCombo, cbAddString, 0, uintptr(unsafe.Pointer(utf16Ptr(a.targets[0].title))))
+	sendMessage(a.processCombo, cbSetCurSel, 0, 0)
+	a.handleCommand(idProcess, cbnSelChange)
+
+	// Leaving point-pick mode for hotkey capture or a different target must
+	// cancel point selection before those controls change application state.
+	a.pointPicker = true
+	a.handleCommand(idHotkey, bnClicked)
+	if a.pointPicker || !a.capture {
+		t.Fatal("hotkey capture did not cancel point selection")
+	}
+	a.handleCommand(idHotkey, bnClicked)
+	if a.capture {
+		t.Fatal("hotkey capture did not return to idle")
+	}
+	other := targetWindow{hwnd: target + 1, pid: windowPID(target) + 1, title: "Another test target"}
+	a.targets = append(a.targets, other)
+	sendMessage(a.processCombo, cbAddString, 0, uintptr(unsafe.Pointer(utf16Ptr(other.title))))
+	a.pointPicker = true
+	sendMessage(a.processCombo, cbSetCurSel, 1, 0)
+	a.handleCommand(idProcess, cbnSelChange)
+	if a.pointPicker || a.selected.hwnd != other.hwnd {
+		t.Fatalf("target change did not cancel point selection: active=%t selected=%+v", a.pointPicker, a.selected)
+	}
 	sendMessage(a.processCombo, cbSetCurSel, 0, 0)
 	a.handleCommand(idProcess, cbnSelChange)
 	a.handleCommand(idHold, bnClicked)

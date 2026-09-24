@@ -30,7 +30,7 @@ func (a *application) makeFonts() {
 }
 
 func (a *application) applyFonts() {
-	for _, hwnd := range []uintptr{a.processCombo, a.pickerButton, a.intervalEdit, a.holdButton, a.hotkeyButton, a.toggleButton, a.pipButton, a.pipSizeCombo, a.pipFPSCombo} {
+	for _, hwnd := range []uintptr{a.processCombo, a.pickerButton, a.clickPointButton, a.intervalEdit, a.holdButton, a.hotkeyButton, a.toggleButton, a.pipButton, a.pipSizeCombo, a.pipFPSCombo} {
 		if hwnd != 0 {
 			sendMessage(hwnd, wmSetFont, a.font, 1)
 		}
@@ -101,21 +101,23 @@ func (a *application) paintMain(hwnd uintptr) {
 	label("A little less clicking.", 28, 64, w-56, 22, a.smallFont, colorMuted)
 	fill(hdc, a.box(28, 98, w-56, 1), colorBorder)
 	label("TARGET WINDOW", 28, 110, w-56, 20, a.smallFont, colorMuted)
-	label("Clicks the center, even when unfocused.", 28, 177, w-56, 24, a.smallFont, colorMuted)
-	fill(hdc, a.box(28, 213, w-56, 1), colorBorder)
-	label("Click interval", 28, 237, w-235, 24, a.font, colorText)
-	label("Delay between clicks / min. 20 ms", 28, 266, w-210, 22, a.smallFont, colorMuted)
-	roundBox(hdc, a.box(w-186, 235, 158, 42), colorField, colorBorder, a.s(8))
-	label("ms", w-58, 243, 25, 26, a.smallFont, colorMuted)
-	label("Hold left click", 28, 310, w-218, 24, a.font, colorText)
-	label("One press, held until you stop.", 28, 339, w-205, 22, a.smallFont, colorMuted)
-	label("Toggle hotkey", 28, 386, w-255, 24, a.font, colorText)
-	label("Keyboard or mouse button", 28, 415, w-245, 22, a.smallFont, colorMuted)
-	fill(hdc, a.box(28, 449, w-56, 1), colorBorder)
-	label("Picture-in-picture", 28, 466, w-200, 24, a.font, colorText)
-	label("Optional preview / Windows 11 24H2+", 28, 502, w-56, 22, a.smallFont, colorMuted)
-	label("MAX. PREVIEW SIZE", 28, 527, 230, 20, a.smallFont, colorMuted)
-	label("REFRESH LIMIT", w-198, 527, 170, 20, a.smallFont, colorMuted)
+	label("Clicks the chosen point, even when unfocused.", 28, 177, w-224, 24, a.smallFont, colorMuted)
+	label("Hover for a point preview.", 28, 198, w-224, 18, a.smallFont, colorMuted)
+	label("Client area: "+a.clickPointDescription(), 28, 214, w-56, 22, a.smallFont, colorMuted)
+	fill(hdc, a.box(28, 241, w-56, 1), colorBorder)
+	label("Click interval", 28, 261, w-235, 24, a.font, colorText)
+	label("Delay between clicks / min. 20 ms", 28, 290, w-210, 22, a.smallFont, colorMuted)
+	roundBox(hdc, a.box(w-186, 259, 158, 42), colorField, colorBorder, a.s(8))
+	label("ms", w-58, 267, 25, 26, a.smallFont, colorMuted)
+	label("Hold left click", 28, 334, w-218, 24, a.font, colorText)
+	label("One press, held until you stop.", 28, 363, w-205, 22, a.smallFont, colorMuted)
+	label("Toggle hotkey", 28, 410, w-255, 24, a.font, colorText)
+	label("Keyboard or mouse button", 28, 439, w-245, 22, a.smallFont, colorMuted)
+	fill(hdc, a.box(28, 473, w-56, 1), colorBorder)
+	label("Picture-in-picture", 28, 490, w-200, 24, a.font, colorText)
+	label("Optional preview / Windows 11 24H2+", 28, 526, w-56, 22, a.smallFont, colorMuted)
+	label("MAX. PREVIEW SIZE", 28, 551, 230, 20, a.smallFont, colorMuted)
+	label("REFRESH LIMIT", w-198, 551, 170, 20, a.smallFont, colorMuted)
 	fill(hdc, a.box(28, h-141, w-56, 1), colorBorder)
 	statusColor := colorMuted
 	if a.statusError {
@@ -255,6 +257,11 @@ func (a *application) drawItem(item *drawItemStruct) {
 	background, foreground, border := colorField, colorText, colorBorder
 	text := ""
 	switch item.ctlID {
+	case idClickPoint:
+		text = "CHOOSE CLICK"
+		if a.pointPicker {
+			text, background, foreground = "CLICK A SPOT", rgb(32, 66, 49), colorGreen
+		}
 	case idPIP:
 		text = "OFF"
 		if a.pip.enabled {

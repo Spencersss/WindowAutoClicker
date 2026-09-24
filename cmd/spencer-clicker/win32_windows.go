@@ -14,47 +14,51 @@ const (
 )
 
 const (
-	wmCreate          = 0x0001
-	wmDestroy         = 0x0002
-	wmSize            = 0x0005
-	wmPaint           = 0x000F
-	wmClose           = 0x0010
-	wmGetMinMaxInfo   = 0x0024
-	wmCommand         = 0x0111
-	wmCtlColorEdit    = 0x0133
-	wmCtlColorList    = 0x0134
-	wmCtlColorBtn     = 0x0135
-	wmCtlColorStatic  = 0x0138
-	wmDrawItem        = 0x002B
-	wmKeyDown         = 0x0100
-	wmKeyUp           = 0x0101
-	wmSysKeyDown      = 0x0104
-	wmSysKeyUp        = 0x0105
-	wmMouseMove       = 0x0200
-	wmLButtonDown     = 0x0201
-	wmLButtonUp       = 0x0202
-	wmRButtonDown     = 0x0204
-	wmRButtonUp       = 0x0205
-	wmMButtonDown     = 0x0207
-	wmMButtonUp       = 0x0208
-	wmXButtonDown     = 0x020B
-	wmXButtonUp       = 0x020C
-	wmAppClickerExit  = 0x8001
-	wmAppToggle       = 0x8002
-	wmSetFont         = 0x0030
-	wmTimer           = 0x0113
-	wmMeasureItem     = 0x002C
-	wmEraseBkgnd      = 0x0014
-	wmDisplayChange   = 0x007E
-	wmSettingChange   = 0x001A
-	wmDPIChanged      = 0x02E0
-	wmQueryEndSession = 0x0011
-	wmEndSession      = 0x0016
-	wmPowerBroadcast  = 0x0218
-	wmAppInput        = 0x8003
-	wmAppPickTarget   = 0x8005
-	wmAppPickReleased = 0x8006
-	wmAppPickHover    = 0x8007
+	wmCreate              = 0x0001
+	wmActivate            = 0x0006
+	wmDestroy             = 0x0002
+	wmSize                = 0x0005
+	wmPaint               = 0x000F
+	wmClose               = 0x0010
+	wmGetMinMaxInfo       = 0x0024
+	wmCommand             = 0x0111
+	wmCtlColorEdit        = 0x0133
+	wmCtlColorList        = 0x0134
+	wmCtlColorBtn         = 0x0135
+	wmCtlColorStatic      = 0x0138
+	wmDrawItem            = 0x002B
+	wmKeyDown             = 0x0100
+	wmKeyUp               = 0x0101
+	wmSysKeyDown          = 0x0104
+	wmSysKeyUp            = 0x0105
+	wmMouseMove           = 0x0200
+	wmLButtonDown         = 0x0201
+	wmLButtonUp           = 0x0202
+	wmRButtonDown         = 0x0204
+	wmRButtonUp           = 0x0205
+	wmMButtonDown         = 0x0207
+	wmMButtonUp           = 0x0208
+	wmXButtonDown         = 0x020B
+	wmXButtonUp           = 0x020C
+	wmAppClickerExit      = 0x8001
+	wmAppToggle           = 0x8002
+	wmSetFont             = 0x0030
+	wmTimer               = 0x0113
+	wmMeasureItem         = 0x002C
+	wmEraseBkgnd          = 0x0014
+	wmDisplayChange       = 0x007E
+	wmSettingChange       = 0x001A
+	wmDPIChanged          = 0x02E0
+	wmQueryEndSession     = 0x0011
+	wmEndSession          = 0x0016
+	wmPowerBroadcast      = 0x0218
+	wmAppInput            = 0x8003
+	wmAppPickTarget       = 0x8005
+	wmAppPickReleased     = 0x8006
+	wmAppPickHover        = 0x8007
+	wmAppPickPoint        = 0x8008
+	wmNCHitTest           = 0x0084
+	wmAppClickPreviewMove = 0x8009
 )
 
 const (
@@ -72,9 +76,12 @@ const (
 	wsMaximizeBox  = 0x00010000
 	wsClipChildren = 0x02000000
 
-	wsExClientEdge = 0x00000200
-	wsExToolWindow = 0x00000080
-	wsExNoActivate = 0x08000000
+	wsExClientEdge  = 0x00000200
+	wsExToolWindow  = 0x00000080
+	wsExNoActivate  = 0x08000000
+	wsExTransparent = 0x00000020
+	wsExLayered     = 0x00080000
+	wsExTopmost     = 0x00000008
 
 	csHRedraw = 0x0002
 	csVRedraw = 0x0001
@@ -113,6 +120,10 @@ const (
 
 	gwOwner          = 4
 	gaRoot           = 2
+	gaRootOwner      = 3
+	htTransparent    = ^uintptr(0)
+	hwndTopmost      = ^uintptr(0)
+	lwaColorKey      = 0x00000001
 	cwpSkipDisabled  = 0x0002
 	cwpSkipInvisible = 0x0001
 	gwlExStyle       = -20
@@ -218,6 +229,8 @@ var (
 	procCreateWindowEx                = user32.NewProc("CreateWindowExW")
 	procDefWindowProc                 = user32.NewProc("DefWindowProcW")
 	procShowWindow                    = user32.NewProc("ShowWindow")
+	procGetForegroundWindow           = user32.NewProc("GetForegroundWindow")
+	procSetLayeredWindowAttributes    = user32.NewProc("SetLayeredWindowAttributes")
 	procUpdateWindow                  = user32.NewProc("UpdateWindow")
 	procGetMessage                    = user32.NewProc("GetMessageW")
 	procTranslateMessage              = user32.NewProc("TranslateMessage")
