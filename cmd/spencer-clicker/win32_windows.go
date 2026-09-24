@@ -99,6 +99,9 @@ const (
 	bnClicked       = 0
 	cbnSelChange    = 1
 	cbnDropdown     = 7
+	cbnCloseUp      = 8
+	cbnSelEndOK     = 9
+	cbnSelEndCancel = 10
 	enChange        = 0x0300
 	cbAddString     = 0x0143
 	cbResetContent  = 0x014B
@@ -108,6 +111,7 @@ const (
 	cbSetItemData   = 0x0151
 	emSetLimitText  = 0x00C5
 	cbSetItemHeight = 0x0153
+	lbItemFromPoint = 0x01A9
 
 	swpNoActivate = 0x0010
 	swpShowWindow = 0x0040
@@ -258,6 +262,7 @@ var (
 	procIsWindow                      = user32.NewProc("IsWindow")
 	procGetWindow                     = user32.NewProc("GetWindow")
 	procWindowFromPoint               = user32.NewProc("WindowFromPoint")
+	procGetComboBoxInfo               = user32.NewProc("GetComboBoxInfo")
 	procChildWindowFromPointEx        = user32.NewProc("ChildWindowFromPointEx")
 	procGetAncestor                   = user32.NewProc("GetAncestor")
 	procClientToScreen                = user32.NewProc("ClientToScreen")
@@ -325,6 +330,14 @@ var (
 	procDwmSetWindowAttribute         = dwmapi.NewProc("DwmSetWindowAttribute")
 	procDwmGetWindowAttribute         = dwmapi.NewProc("DwmGetWindowAttribute")
 )
+
+type comboBoxInfo struct {
+	size                          uint32
+	rcItem                        rect
+	rcButton                      rect
+	uButtonState                  uint32
+	hwndCombo, hwndItem, hwndList uintptr
+}
 
 type point struct{ x, y int32 }
 type rect struct{ left, top, right, bottom int32 }

@@ -107,7 +107,7 @@ func (a *application) paintMain(hwnd uintptr) {
 	}
 
 	// Fixed essentials: target, click point, start/stop, and status.
-	label("spencer / clicker", 28, 24, mainW-56, 36, a.titleFont, colorText)
+	label("spencer / clicker", 28, 24, mainW-192, 36, a.titleFont, colorText)
 	label("A little less clicking.", 28, 64, mainW-56, 22, a.smallFont, colorMuted)
 	fill(hdc, a.box(28, 98, mainW-56, 1), colorBorder)
 	label("TARGET WINDOW", 28, 110, mainW-56, 20, a.smallFont, colorMuted)
@@ -211,6 +211,38 @@ func drawWindowSelector(hdc uintptr, bounds rect, color uintptr) {
 	procDeleteObject.Call(hole)
 }
 
+func drawPresetBook(hdc uintptr, bounds rect, color uintptr) {
+	size := min(bounds.right-bounds.left, bounds.bottom-bounds.top)
+	if size <= 0 {
+		return
+	}
+	const view = int32(32)
+	left := bounds.left + ((bounds.right-bounds.left)-size)/2
+	top := bounds.top + ((bounds.bottom-bounds.top)-size)/2
+	x := func(v int32) int32 { return left + v*size/view }
+	y := func(v int32) int32 { return top + v*size/view }
+	pen, _, _ := procCreatePen.Call(0, uintptr(max(1, size/16)), color)
+	oldPen, _, _ := procSelectObject.Call(hdc, pen)
+	polyline := func(points ...point) {
+		if len(points) < 2 {
+			return
+		}
+		procMoveToEx.Call(hdc, uintptr(x(points[0].x)), uintptr(y(points[0].y)), 0)
+		for _, p := range points[1:] {
+			procLineTo.Call(hdc, uintptr(x(p.x)), uintptr(y(p.y)))
+		}
+	}
+	middle := view / 2
+	polyline(point{4, 5}, point{middle - 1, 7}, point{middle - 1, 27}, point{4, 25}, point{4, 5})
+	polyline(point{middle + 1, 7}, point{view - 4, 5}, point{view - 4, 25}, point{middle + 1, 27}, point{middle + 1, 7})
+	polyline(point{middle, 6}, point{middle, 27})
+	polyline(point{7, 11}, point{middle - 3, 12})
+	polyline(point{7, 16}, point{middle - 3, 17})
+	polyline(point{middle + 3, 12}, point{view - 7, 11})
+	polyline(point{middle + 3, 17}, point{view - 7, 16})
+	procSelectObject.Call(hdc, oldPen)
+	procDeleteObject.Call(pen)
+}
 func shouldDrawOwnerFocusCue(itemState uint32) bool {
 	// Native focus rectangles read as a persistent white box in this dark UI.
 	// Keep keyboard focus behavior but don't add a second visual border.
@@ -340,9 +372,9 @@ func (a *application) drawItem(item *drawItemStruct) {
 			text, background, foreground = "CLICK A SPOT", rgb(32, 66, 49), colorGreen
 		}
 	case idPresetDrawer:
-		text = "SAVED CLICKS  +"
+		text = "PRESET"
 		if a.presetDrawerExpanded {
-			text = "SAVED CLICKS  -"
+			background, foreground, border = rgb(32, 66, 49), colorGreen, colorGreen
 		}
 	case idPresetSave:
 		text = "SAVE NEW"
@@ -384,7 +416,17 @@ func (a *application) drawItem(item *drawItemStruct) {
 	box := item.rcItem
 	box.left += a.s(8)
 	box.right -= a.s(8)
-	a.text(item.hdc, text, box, a.font, foreground, dtCenter)
+	if item.ctlID == idPresetDrawer {
+		iconBox := item.rcItem
+		iconBox.left += a.s(14)
+		iconBox.right = iconBox.left + a.s(20)
+		drawPresetBook(item.hdc, iconBox, foreground)
+		box.left = iconBox.right + a.s(10)
+		box.right -= a.s(8)
+		a.text(item.hdc, text, box, a.font, foreground, dtLeft)
+	} else {
+		a.text(item.hdc, text, box, a.font, foreground, dtCenter)
+	}
 	if shouldDrawOwnerFocusCue(item.itemState) {
 		box.top += a.s(4)
 		box.bottom -= a.s(4)

@@ -78,6 +78,10 @@ type application struct {
 	clickPreviewPoint                                                                                  point
 	clickPreviewMousePoint                                                                             point
 	clickPreviewMovePosted                                                                             bool
+	presetDropdownOpen                                                                                 bool
+	presetDropdownCommit                                                                               bool
+	presetDropdownOriginalName                                                                         string
+	presetListHwnd                                                                                     uintptr
 	status                                                                                             string
 	statusError                                                                                        bool
 	targets                                                                                            []targetWindow
@@ -263,7 +267,7 @@ func (a *application) createControls(hwnd uintptr) {
 	a.pipButton = create("BUTTON", "Picture-in-picture: Off", bsOwnerDraw, idPIP)
 	a.pipSizeCombo = create("COMBOBOX", "Preview resolution", cbsDropdownList|cbsOwnerDrawFixed|cbsHasStrings, idPIPSize)
 	a.pipFPSCombo = create("COMBOBOX", "Preview refresh rate", cbsDropdownList|cbsOwnerDrawFixed|cbsHasStrings, idPIPFPS)
-	a.presetDrawerButton = create("BUTTON", "Saved clicks +", bsOwnerDraw, idPresetDrawer)
+	a.presetDrawerButton = create("BUTTON", "Preset", bsOwnerDraw, idPresetDrawer)
 	a.presetCombo = create("COMBOBOX", "Choose a saved click...", cbsDropdownList|cbsOwnerDrawFixed|cbsHasStrings, idPresetList)
 	a.presetNameEdit = create("EDIT", "", esAutoHScroll, idPresetName)
 	a.presetSaveButton = create("BUTTON", "Save new", bsOwnerDraw, idPresetSave)
@@ -368,7 +372,7 @@ func (a *application) layout() {
 	place(a.pickerButton, mainW-70, targetControlTop, 42, targetControlHeight, true)
 	place(a.clickPointButton, 28, chooseClickTop, 156, 36, true)
 	place(a.toggleButton, 28, 256, mainW-56, 44, true)
-	place(a.presetDrawerButton, mainW-148, 338, 120, 30, true)
+	place(a.presetDrawerButton, mainW-148, 26, 120, 36, true)
 
 	clickerTop := settingsTop
 	pipTop := clickerTop + clickerSettingsHeight(a.clickerSettingsExpanded) + settingsSectionGap
@@ -592,11 +596,7 @@ func (a *application) updateControls() {
 		action = "Stop clicker"
 	}
 	setWindowText(a.toggleButton, action+" ["+a.hotkey.name()+"]")
-	if a.presetDrawerExpanded {
-		setWindowText(a.presetDrawerButton, "Saved clicks  -")
-	} else {
-		setWindowText(a.presetDrawerButton, "Saved clicks  +")
-	}
+	setWindowText(a.presetDrawerButton, "Preset")
 	a.updateSettingsHeaders()
 	for _, hwnd := range []uintptr{a.pickerButton, a.clickPointButton, a.holdButton, a.hotkeyButton, a.toggleButton, a.clickerSettingsButton, a.pipSettingsButton, a.presetDrawerButton, a.hwnd} {
 		if hwnd != 0 {
@@ -1141,6 +1141,7 @@ func clampWindowRectToWorkArea(bounds, work rect) rect {
 	return rect{left: left, top: top, right: left + width, bottom: top + height}
 }
 func (a *application) togglePresetDrawer() {
+	a.closePresetPreviewDropdown()
 	wasExpanded := a.presetDrawerExpanded
 	a.presetDrawerExpanded = !wasExpanded
 	if a.hwnd != 0 && isWindow(a.hwnd) {
@@ -1170,6 +1171,7 @@ func (a *application) togglePresetDrawer() {
 	a.updateControls()
 }
 func (a *application) toggle() {
+	a.closePresetPreviewDropdown()
 	a.capture = false
 	if a.picker || a.pickerHighlighted != 0 {
 		a.clearPickerPreview()
@@ -1224,6 +1226,8 @@ func (a *application) handleCommand(id, notification uint16) {
 			a.saveOrReport()
 		}
 		if notification == cbnSelChange {
+			a.closePresetPreviewDropdown()
+			a.hideClickPointPreview()
 			index := int32(sendMessage(a.processCombo, cbGetCurSel, 0, 0))
 			if index >= 0 && int(index) < len(a.targets) {
 				if a.pointPicker {
@@ -1319,9 +1323,21 @@ func (a *application) handleCommand(id, notification uint16) {
 			a.togglePresetDrawer()
 		}
 	case idPresetList:
-		if notification == cbnSelChange {
-			a.presetSelectedName = a.selectedPresetName()
+		switch notification {
+		case cbnDropdown:
+			a.openPresetPreviewDropdown()
+		case cbnSelEndOK:
+			a.presetDropdownCommit = true
+		case cbnSelEndCancel:
+			a.presetDropdownCommit = false
+		case cbnCloseUp:
+			a.closePresetPreviewDropdown()
 			a.updateControls()
+		case cbnSelChange:
+			if !a.presetDropdownOpen {
+				a.presetSelectedName = a.selectedPresetName()
+				a.updateControls()
+			}
 		}
 	case idPresetSave:
 		if notification == bnClicked {
@@ -1361,6 +1377,7 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 		a.createControls(hwnd)
 		return 0
 	case wmSize:
+		a.closePresetPreviewDropdown()
 		a.hideClickPointPreview()
 		if wparam == 1 && a.tray.registered {
 			procShowWindow.Call(hwnd, swHide)
@@ -1374,6 +1391,7 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 	case wmActivate:
 		if loword(wparam) == 0 {
 			a.hideClickPointPreview()
+			a.closePresetPreviewDropdown()
 		}
 	case wmGetMinMaxInfo:
 		info := (*minMaxInfo)(unsafe.Pointer(lparam))
@@ -1501,6 +1519,8 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 			a.updateControls()
 		}
 	case wmClose:
+		a.closePresetPreviewDropdown()
+		a.hideClickPointPreview()
 		if err := a.clicker.stop(); err != nil {
 			a.showWindow()
 			a.setStatus("Release failed. Press Stop to retry before closing.", true)
