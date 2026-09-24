@@ -104,7 +104,7 @@ func TestNativeDelivery(t *testing.T) {
 	defer runtime.UnlockOSThread()
 	hwnd := makeFixture(t, false)
 	defer procDestroyWindow.Call(hwnd)
-	d := &nativeDriver{owner: hwnd, target: targetWindow{hwnd: hwnd, pid: windowPID(hwnd)}, coords: 150<<16 | 230}
+	d := &nativeDriver{owner: hwnd, target: targetWindow{hwnd: hwnd, pid: windowPID(hwnd)}, coords: 150<<16 | 230, rootCoords: 150<<16 | 230}
 	c := &clicker{driver: d}
 	fixture.engine, fixture.driver = c, d
 	if err := c.start(50, false); err != nil {
@@ -253,12 +253,12 @@ func TestPickerConsumesValidSelectionClick(t *testing.T) {
 	if got := mouseHookProc(hcAction, wmLButtonDown, data); got != 1 || !a.pickerConsumed {
 		t.Fatalf("picker mouse-down result = %d, consumed = %t; want 1, true", got, a.pickerConsumed)
 	}
-	picked, ok := pickTargetAt(data.pt)
-	if !ok {
-		t.Fatal("pickTargetAt rejected the fixture after mouse-down")
+	_, inputHwnd, ok := pickInputAt(data.pt)
+	if !ok || inputHwnd != fixture.label {
+		t.Fatalf("pickInputAt = %x, %t; want child %x, true", inputHwnd, ok, fixture.label)
 	}
-	mainWindowProc(a.hwnd, wmAppPickTarget, picked, 0)
-	if a.picker || !a.pickerConsumed || a.selected.hwnd != hwnd {
+	mainWindowProc(a.hwnd, wmAppPickTarget, inputHwnd, packPoint(data.pt))
+	if a.picker || !a.pickerConsumed || a.selected.hwnd != hwnd || a.selected.inputHwnd != fixture.label || !a.selected.hasInputPoint {
 		t.Fatalf("selection dispatch state = picker %t, consumed %t, selected %+v", a.picker, a.pickerConsumed, a.selected)
 	}
 	if got := mouseHookProc(hcAction, wmLButtonUp, data); got != 1 || a.pickerConsumed {
@@ -282,8 +282,11 @@ func TestPickerStateAndSelection(t *testing.T) {
 		t.Fatal("starting the clicker did not disarm the picker")
 	}
 	a.picker = true
-	a.selectPickedTarget(hwnd)
-	if a.picker || a.selected.hwnd != hwnd || a.selected.pid != windowPID(hwnd) {
+	var bounds rect
+	procGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&bounds)))
+	screenPoint := point{(bounds.left + bounds.right) / 2, (bounds.top + bounds.bottom) / 2}
+	a.selectPickedTarget(hwnd, screenPoint)
+	if a.picker || a.selected.hwnd != hwnd || a.selected.pid != windowPID(hwnd) || !a.selected.hasInputPoint {
 		t.Fatalf("picked target state = picker %t, selected %+v", a.picker, a.selected)
 	}
 
