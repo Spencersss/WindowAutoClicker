@@ -35,6 +35,13 @@ const targetComboItemHeight int32 = 32
 const targetControlHeight = targetComboItemHeight + 2
 const presetDrawerWidth int32 = 320
 
+const (
+	clickerIntervalEditWidth int32 = 190
+	clickerIntervalUnitWidth int32 = 26
+	clickerIntervalUnitGap   int32 = 8
+	clickerIntervalRightGap  int32 = 28
+)
+
 var activeApp *application
 
 type application struct {
@@ -110,6 +117,15 @@ func newApplication() *application {
 }
 
 func (a *application) s(value int32) int32 { return value * a.dpi / 96 }
+
+func intervalControlLayout(mainWidth int32) (editX, editWidth, unitX int32) {
+	right := max(28, mainWidth-clickerIntervalRightGap)
+	unitX = max(28, right-clickerIntervalUnitWidth)
+	available := max(0, unitX-clickerIntervalUnitGap-28)
+	editWidth = min(clickerIntervalEditWidth, available)
+	editX = unitX - clickerIntervalUnitGap - editWidth
+	return editX, editWidth, unitX
+}
 
 func (a *application) run() error {
 	activeApp = a
@@ -358,7 +374,8 @@ func (a *application) layout() {
 	pipTop := clickerTop + clickerSettingsHeight(a.clickerSettingsExpanded) + settingsSectionGap
 	placeSettings(a.clickerSettingsButton, 28, clickerTop, mainW-56, settingsSectionHeaderHeight, true)
 	placeSettings(a.pipSettingsButton, 28, pipTop, mainW-56, settingsSectionHeaderHeight, true)
-	placeSettings(a.intervalEdit, mainW-174, clickerTop+52, 146, 36, a.clickerSettingsExpanded)
+	intervalEditX, intervalEditWidth, _ := intervalControlLayout(mainW)
+	placeSettings(a.intervalEdit, intervalEditX, clickerTop+52, intervalEditWidth, 36, a.clickerSettingsExpanded)
 	placeSettings(a.holdButton, mainW-158, clickerTop+98, 130, 36, a.clickerSettingsExpanded)
 	placeSettings(a.hotkeyButton, mainW-158, clickerTop+144, 130, 36, a.clickerSettingsExpanded)
 	placeSettings(a.pipButton, mainW-158, pipTop+52, 130, 36, a.pipSettingsExpanded)

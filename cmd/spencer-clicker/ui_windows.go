@@ -149,7 +149,9 @@ func (a *application) paintMain(hwnd uintptr) {
 	clickerTop := settingsTop - a.scroll
 	pipTop := settingsTop + clickerSettingsHeight(a.clickerSettingsExpanded) + settingsSectionGap - a.scroll
 	if a.clickerSettingsExpanded {
-		label("Click interval", 28, clickerTop+52, mainW-205, 36, a.font, colorText)
+		intervalEditX, _, intervalUnitX := intervalControlLayout(mainW)
+		label("Click interval", 28, clickerTop+52, max(0, intervalEditX-28), 36, a.font, colorText)
+		a.text(hdc, "ms", a.box(intervalUnitX, clickerTop+52, clickerIntervalUnitWidth, 36), a.smallFont, colorMuted, dtLeft|dtVCenter|dtSingleLine)
 		label("Hold left click", 28, clickerTop+98, mainW-205, 36, a.font, colorText)
 		label("Toggle hotkey", 28, clickerTop+144, mainW-205, 36, a.font, colorText)
 	}

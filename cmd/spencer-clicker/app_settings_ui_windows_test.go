@@ -210,3 +210,18 @@ func TestSaveSettingsDoesNotOverwriteUnreadableSettings(t *testing.T) {
 		t.Fatalf("settings file changed after load failure: got %q", got)
 	}
 }
+
+func TestIntervalControlLayoutFitsMaximumMillisecondsAndUnit(t *testing.T) {
+	for _, mainWidth := range []int32{520, 536} {
+		editX, editWidth, unitX := intervalControlLayout(mainWidth)
+		if editWidth != clickerIntervalEditWidth {
+			t.Fatalf("interval editor width at %dpx = %d, want %d", mainWidth, editWidth, clickerIntervalEditWidth)
+		}
+		if editX < 28 || editX+editWidth+clickerIntervalUnitGap != unitX {
+			t.Fatalf("interval editor and unit overlap or exceed left inset at %dpx: edit=(%d,%d), unitX=%d", mainWidth, editX, editWidth, unitX)
+		}
+		if unitX+clickerIntervalUnitWidth != mainWidth-clickerIntervalRightGap {
+			t.Fatalf("interval unit right edge at %dpx = %d, want %d", mainWidth, unitX+clickerIntervalUnitWidth, mainWidth-clickerIntervalRightGap)
+		}
+	}
+}
