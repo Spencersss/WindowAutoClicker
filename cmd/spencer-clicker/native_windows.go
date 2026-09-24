@@ -296,7 +296,36 @@ func targetWindowFor(hwnd uintptr) (targetWindow, bool) {
 	if visible == 0 || pid == 0 || pid == a.pid || owner != 0 || style&wsExToolWindow != 0 || title == "" {
 		return targetWindow{}, false
 	}
-	return targetWindow{hwnd: hwnd, pid: pid, title: title}, true
+	return targetWindow{hwnd: hwnd, pid: pid, title: title, identity: windowIdentityFor(hwnd, pid, title)}, true
+}
+
+func windowIdentityFor(hwnd uintptr, pid uint32, title string) windowIdentity {
+	identity := windowIdentity{WindowClass: windowClassName(hwnd), Title: title}
+	process, _, _ := procOpenProcess.Call(processQueryLimitedInformation, 0, uintptr(pid))
+	if process == 0 {
+		return identity
+	}
+	defer procCloseHandle.Call(process)
+
+	buffer := make([]uint16, 32768)
+	length := uint32(len(buffer))
+	ok, _, _ := procQueryFullProcessImageName.Call(process, 0, uintptr(unsafe.Pointer(&buffer[0])), uintptr(unsafe.Pointer(&length)))
+	if ok != 0 && length > 0 {
+		identity.ExecutablePath = normalizeExecutablePath(syscall.UTF16ToString(buffer[:length]))
+	}
+	return identity
+}
+
+func windowClassName(hwnd uintptr) string {
+	if hwnd == 0 {
+		return ""
+	}
+	buffer := make([]uint16, 256)
+	length, _, _ := procGetClassName.Call(hwnd, uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)))
+	if length == 0 {
+		return ""
+	}
+	return syscall.UTF16ToString(buffer[:length])
 }
 
 func pickTargetAt(screen point) (uintptr, bool) {
@@ -462,6 +491,78 @@ func (a *application) queueClickPointPreview(screen point) {
 		a.clickPreviewMovePosted = false
 	}
 }
+
+func (a *application) openPresetPreviewDropdown() {
+	a.presetDropdownOpen = true
+	a.presetDropdownCommit = false
+	a.presetDropdownOriginalName = a.presetSelectedName
+	a.presetListHwnd = 0
+	if a.presetCombo == 0 {
+		return
+	}
+	info := comboBoxInfo{size: uint32(unsafe.Sizeof(comboBoxInfo{}))}
+	if result, _, _ := procGetComboBoxInfo.Call(a.presetCombo, uintptr(unsafe.Pointer(&info))); result != 0 {
+		a.presetListHwnd = info.hwndList
+	}
+}
+
+func (a *application) closePresetPreviewDropdown() {
+	if !a.presetDropdownOpen && a.presetListHwnd == 0 {
+		return
+	}
+	if a.presetDropdownOpen {
+		if a.presetDropdownCommit {
+			a.presetSelectedName = a.selectedPresetName()
+		} else {
+			a.presetSelectedName = a.presetDropdownOriginalName
+			index := findSavedPreset(a.currentPresets(), a.presetDropdownOriginalName)
+			if index >= 0 {
+				sendMessage(a.presetCombo, cbSetCurSel, uintptr(index), 0)
+			} else {
+				sendMessage(a.presetCombo, cbSetCurSel, ^uintptr(0), 0)
+			}
+		}
+	}
+	a.presetDropdownOpen = false
+	a.presetDropdownCommit = false
+	a.presetDropdownOriginalName = ""
+	a.presetListHwnd = 0
+	a.hideClickPointPreview()
+}
+
+func (a *application) hoveredPresetPoint(screen point) (point, bool) {
+	if !a.presetDropdownOpen || !a.presetDrawerExpanded || a.presetCombo == 0 {
+		return point{}, false
+	}
+	list := a.presetListHwnd
+	if list == 0 || !isWindow(list) {
+		info := comboBoxInfo{size: uint32(unsafe.Sizeof(comboBoxInfo{}))}
+		if result, _, _ := procGetComboBoxInfo.Call(a.presetCombo, uintptr(unsafe.Pointer(&info))); result == 0 || info.hwndList == 0 {
+			return point{}, false
+		}
+		list = info.hwndList
+		a.presetListHwnd = list
+	}
+	var listBounds rect
+	if result, _, _ := procGetWindowRect.Call(list, uintptr(unsafe.Pointer(&listBounds))); result == 0 || !pointInClient(screen, listBounds) {
+		return point{}, false
+	}
+	listPoint := screen
+	if converted, _, _ := procScreenToClient.Call(list, uintptr(unsafe.Pointer(&listPoint))); converted == 0 {
+		return point{}, false
+	}
+	result := sendMessage(list, lbItemFromPoint, 0, mouseCoords(listPoint))
+	if hiword(result) != 0 {
+		return point{}, false
+	}
+	index := int(loword(result))
+	presets := a.currentPresets()
+	if index < 0 || index >= len(presets) {
+		return point{}, false
+	}
+	return point{x: presets[index].Point.X, y: presets[index].Point.Y}, true
+}
+
 func (a *application) updateClickPointPreview(screen point) {
 	if a.picker || a.pointPicker || a.clicker.running || a.selected.hwnd == 0 || a.clickPointButton == 0 {
 		a.hideClickPointPreview()
@@ -471,7 +572,18 @@ func (a *application) updateClickPointPreview(screen point) {
 	iconic, _, _ := procIsIconic.Call(a.hwnd)
 	foreground, _, _ := procGetForegroundWindow.Call()
 	foregroundOwner, _, _ := procGetAncestor.Call(foreground, gaRootOwner)
-	if visible == 0 || iconic != 0 || (foreground != a.hwnd && foregroundOwner != a.hwnd) || windowFromPoint(screen) != a.clickPointButton {
+	if visible == 0 || iconic != 0 || (foreground != a.hwnd && foregroundOwner != a.hwnd) {
+		a.hideClickPointPreview()
+		return
+	}
+	if presetPoint, hoveringPreset := a.hoveredPresetPoint(screen); hoveringPreset {
+		if a.showClickPointPreviewAt(presetPoint) {
+			return
+		}
+		a.hideClickPointPreview()
+		return
+	}
+	if windowFromPoint(screen) != a.clickPointButton {
 		a.hideClickPointPreview()
 		return
 	}
@@ -481,29 +593,40 @@ func (a *application) updateClickPointPreview(screen point) {
 		return
 	}
 	clickPoint, _, ok := targetClickPoint(a.selected)
-	if !ok {
+	if !ok || !a.showClickPointPreviewAt(clickPoint) {
 		a.hideClickPointPreview()
-		return
 	}
+}
+
+func (a *application) showClickPointPreviewAt(clientPoint point) bool {
+	if a.selected.hwnd == 0 || !isWindow(a.selected.hwnd) || windowPID(a.selected.hwnd) != a.selected.pid {
+		return false
+	}
+	var clientBounds rect
+	if !getClientRect(a.selected.hwnd, &clientBounds) || !pointInClient(clientPoint, clientBounds) {
+		return false
+	}
+	clickPoint := clientPoint
 	if converted, _, _ := procClientToScreen.Call(a.selected.hwnd, uintptr(unsafe.Pointer(&clickPoint))); converted == 0 {
-		a.hideClickPointPreview()
-		return
+		return false
 	}
 	if a.clickPreviewOverlay == 0 {
 		a.clickPreviewOverlay = createWindow(wsExTopmost|wsExTransparent|wsExNoActivate|wsExToolWindow|wsExLayered,
 			clickPreviewClassName, "", wsPopup, 0, 0, 30, 30, 0, 0, a.instance)
 		if a.clickPreviewOverlay == 0 {
-			return
+			return false
 		}
 		procSetLayeredWindowAttributes.Call(a.clickPreviewOverlay, clickPreviewColorKey, 0, lwaColorKey)
 	}
 	if a.clickPreviewShown && a.clickPreviewPoint == clickPoint {
-		return
+		return true
 	}
 	if result, _, _ := procSetWindowPos.Call(a.clickPreviewOverlay, hwndTopmost, uintptr(clickPoint.x-15), uintptr(clickPoint.y-15), 30, 30, swpShowWindow|swpNoActivate); result != 0 {
 		a.clickPreviewShown = true
 		a.clickPreviewPoint = clickPoint
+		return true
 	}
+	return false
 }
 
 func (a *application) hideClickPointPreview() {

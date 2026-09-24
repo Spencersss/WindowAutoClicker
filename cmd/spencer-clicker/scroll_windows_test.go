@@ -140,15 +140,11 @@ func TestTargetAndChooseClickHaveGapAtSupportedDPI(t *testing.T) {
 	}
 }
 
-func TestOwnerDrawFocusCueFollowsWindowsUIState(t *testing.T) {
-	if shouldDrawOwnerFocusCue(odsFocus | odsNoFocusRect) {
-		t.Fatal("owner-drawn control showed a mouse focus rectangle despite ODS_NOFOCUSRECT")
-	}
-	if !shouldDrawOwnerFocusCue(odsFocus) {
-		t.Fatal("owner-drawn control hid the keyboard focus cue")
-	}
-	if shouldDrawOwnerFocusCue(0) {
-		t.Fatal("owner-drawn control showed a focus cue without focus")
+func TestOwnerDrawFocusCueIsSuppressed(t *testing.T) {
+	for _, state := range []uint32{0, odsFocus, odsFocus | odsNoFocusRect, odsSelected} {
+		if shouldDrawOwnerFocusCue(state) {
+			t.Errorf("owner-drawn control showed a focus rectangle for item state %#x", state)
+		}
 	}
 }
 

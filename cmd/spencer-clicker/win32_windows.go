@@ -99,6 +99,9 @@ const (
 	bnClicked       = 0
 	cbnSelChange    = 1
 	cbnDropdown     = 7
+	cbnCloseUp      = 8
+	cbnSelEndOK     = 9
+	cbnSelEndCancel = 10
 	enChange        = 0x0300
 	cbAddString     = 0x0143
 	cbResetContent  = 0x014B
@@ -108,6 +111,7 @@ const (
 	cbSetItemData   = 0x0151
 	emSetLimitText  = 0x00C5
 	cbSetItemHeight = 0x0153
+	lbItemFromPoint = 0x01A9
 
 	swpNoActivate = 0x0010
 	swpShowWindow = 0x0040
@@ -127,6 +131,9 @@ const (
 	cwpSkipDisabled  = 0x0002
 	cwpSkipInvisible = 0x0001
 	gwlExStyle       = -20
+
+	processQueryLimitedInformation = 0x1000
+	monitorDefaultToNearest        = 2
 
 	colorWindow = 5
 	transparent = 1
@@ -249,19 +256,26 @@ var (
 	procSetWindowText                 = user32.NewProc("SetWindowTextW")
 	procGetWindowText                 = user32.NewProc("GetWindowTextW")
 	procGetWindowTextLength           = user32.NewProc("GetWindowTextLengthW")
+	procGetClassName                  = user32.NewProc("GetClassNameW")
 	procEnumWindows                   = user32.NewProc("EnumWindows")
 	procIsWindowVisible               = user32.NewProc("IsWindowVisible")
 	procIsWindow                      = user32.NewProc("IsWindow")
 	procGetWindow                     = user32.NewProc("GetWindow")
 	procWindowFromPoint               = user32.NewProc("WindowFromPoint")
+	procGetComboBoxInfo               = user32.NewProc("GetComboBoxInfo")
 	procChildWindowFromPointEx        = user32.NewProc("ChildWindowFromPointEx")
 	procGetAncestor                   = user32.NewProc("GetAncestor")
 	procClientToScreen                = user32.NewProc("ClientToScreen")
 	procScreenToClient                = user32.NewProc("ScreenToClient")
 	procGetWindowLongPtr              = user32.NewProc("GetWindowLongPtrW")
 	procGetClientRect                 = user32.NewProc("GetClientRect")
+	procMonitorFromWindow             = user32.NewProc("MonitorFromWindow")
+	procGetMonitorInfo                = user32.NewProc("GetMonitorInfoW")
 	procGetClientRectRaw              = procGetClientRect
 	procGetWindowThreadProcessID      = user32.NewProc("GetWindowThreadProcessId")
+	procOpenProcess                   = kernel32.NewProc("OpenProcess")
+	procQueryFullProcessImageName     = kernel32.NewProc("QueryFullProcessImageNameW")
+	procCloseHandle                   = kernel32.NewProc("CloseHandle")
 	procGetCurrentProcessID           = kernel32.NewProc("GetCurrentProcessId")
 	procSetTimer                      = user32.NewProc("SetTimer")
 	procKillTimer                     = user32.NewProc("KillTimer")
@@ -317,8 +331,22 @@ var (
 	procDwmGetWindowAttribute         = dwmapi.NewProc("DwmGetWindowAttribute")
 )
 
+type comboBoxInfo struct {
+	size                          uint32
+	rcItem                        rect
+	rcButton                      rect
+	uButtonState                  uint32
+	hwndCombo, hwndItem, hwndList uintptr
+}
+
 type point struct{ x, y int32 }
 type rect struct{ left, top, right, bottom int32 }
+type monitorInfo struct {
+	cbSize  uint32
+	monitor rect
+	work    rect
+	flags   uint32
+}
 type msg struct {
 	hwnd           uintptr
 	message        uint32

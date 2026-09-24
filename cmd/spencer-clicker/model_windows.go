@@ -76,6 +76,7 @@ type targetWindow struct {
 	hwnd          uintptr
 	title         string
 	pid           uint32
+	identity      windowIdentity
 	inputHwnd     uintptr
 	inputPoint    point
 	hasInputPoint bool

@@ -20,12 +20,27 @@ const (
 	idPIPFPS
 	idClickerSettings
 	idPIPSettings
+	idPresetDrawer
+	idPresetList
+	idPresetName
+	idPresetSave
+	idPresetLoad
+	idPresetOverwrite
+	idPresetDelete
 )
 
 const healthTimerID = 0x7FFFFFFF
 
 const targetComboItemHeight int32 = 32
 const targetControlHeight = targetComboItemHeight + 2
+const presetDrawerWidth int32 = 320
+
+const (
+	clickerIntervalEditWidth int32 = 190
+	clickerIntervalUnitWidth int32 = 26
+	clickerIntervalUnitGap   int32 = 8
+	clickerIntervalRightGap  int32 = 28
+)
 
 var activeApp *application
 
@@ -41,7 +56,15 @@ type application struct {
 	bgBrush, fieldBrush                                                                                uintptr
 	processCombo, pickerButton, clickPointButton, intervalEdit, holdButton, hotkeyButton, toggleButton uintptr
 	clickerSettingsButton, pipSettingsButton                                                           uintptr
+	presetDrawerButton, presetCombo, presetNameEdit, presetSaveButton, presetLoadButton                uintptr
+	presetOverwriteButton, presetDeleteButton                                                          uintptr
 	clickerSettingsExpanded, pipSettingsExpanded                                                       bool
+	presetDrawerExpanded                                                                               bool
+	presetSelectedName                                                                                 string
+	settingsPath                                                                                       string
+	settingsLoadError                                                                                  string
+	settingsWritable                                                                                   bool
+	settings                                                                                           appSettings
 	keyboardHook, mouseHook                                                                            uintptr
 	keysDown                                                                                           [256]bool
 	mouseDown                                                                                          [5]bool
@@ -55,6 +78,10 @@ type application struct {
 	clickPreviewPoint                                                                                  point
 	clickPreviewMousePoint                                                                             point
 	clickPreviewMovePosted                                                                             bool
+	presetDropdownOpen                                                                                 bool
+	presetDropdownCommit                                                                               bool
+	presetDropdownOriginalName                                                                         string
+	presetListHwnd                                                                                     uintptr
 	status                                                                                             string
 	statusError                                                                                        bool
 	targets                                                                                            []targetWindow
@@ -74,11 +101,35 @@ func newApplication() *application {
 		}
 	}
 	a.clicker.driver = &a.driver
-	a.pip.options = captureOptions{width: 320, height: 180, fps: 5}
+	a.settings = defaultAppSettings()
+	if path, err := settingsFilePath(); err == nil {
+		a.settingsPath = path
+		if settings, loadErr := loadAppSettings(path); loadErr == nil {
+			a.settings = settings
+			a.settingsWritable = true
+		} else {
+			a.settingsLoadError = loadErr.Error()
+		}
+	} else {
+		a.settingsLoadError = err.Error()
+	}
+	a.settings = normalizeAppSettings(a.settings)
+	a.hotkey = hotkey{kind: hotkeyKind(a.settings.Hotkey.Kind), code: a.settings.Hotkey.Code}
+	a.hold = a.settings.Hold
+	a.pip.options = captureOptions{width: a.settings.PIPWidth, height: a.settings.PIPHeight, fps: a.settings.PIPFPS}
 	return a
 }
 
 func (a *application) s(value int32) int32 { return value * a.dpi / 96 }
+
+func intervalControlLayout(mainWidth int32) (editX, editWidth, unitX int32) {
+	right := max(28, mainWidth-clickerIntervalRightGap)
+	unitX = max(28, right-clickerIntervalUnitWidth)
+	available := max(0, unitX-clickerIntervalUnitGap-28)
+	editWidth = min(clickerIntervalEditWidth, available)
+	editX = unitX - clickerIntervalUnitGap - editWidth
+	return editX, editWidth, unitX
+}
 
 func (a *application) run() error {
 	activeApp = a
@@ -112,6 +163,10 @@ func (a *application) run() error {
 	}
 	a.driver.owner = a.hwnd
 	a.refreshTargets()
+	a.restoreStartupTarget()
+	if a.settingsLoadError != "" {
+		a.setStatus("Settings could not be loaded; the existing file will be preserved. "+a.settingsLoadError, true)
+	}
 	if err := a.createTray(); err != nil {
 		return err
 	}
@@ -119,6 +174,7 @@ func (a *application) run() error {
 		return err
 	}
 	a.updateControls()
+	a.refreshPresetControls()
 	procShowWindow.Call(a.hwnd, swShow)
 	procUpdateWindow.Call(a.hwnd)
 
@@ -150,6 +206,7 @@ func (a *application) run() error {
 }
 
 func (a *application) cleanup() {
+	_ = a.saveSettings()
 	a.stopPIP()
 	a.waitPIPShutdown()
 	a.uninstallHooks()
@@ -202,7 +259,7 @@ func (a *application) createControls(hwnd uintptr) {
 	a.clickPointButton = create("BUTTON", "Choose Click", bsOwnerDraw, idClickPoint)
 	a.toggleButton = create("BUTTON", "Start clicker [F9]", bsOwnerDraw, idToggle)
 	a.clickerSettingsButton = create("BUTTON", "Clicker settings", bsOwnerDraw, idClickerSettings)
-	a.intervalEdit = create("EDIT", "50", esNumber|esAutoHScroll, idInterval)
+	a.intervalEdit = create("EDIT", strconv.Itoa(a.settings.IntervalMS), esNumber|esAutoHScroll, idInterval)
 	sendMessage(a.intervalEdit, emSetLimitText, 10, 0)
 	a.holdButton = create("BUTTON", "Hold left click: Off", bsOwnerDraw, idHold)
 	a.hotkeyButton = create("BUTTON", "Hotkey: F9", bsOwnerDraw, idHotkey)
@@ -210,14 +267,22 @@ func (a *application) createControls(hwnd uintptr) {
 	a.pipButton = create("BUTTON", "Picture-in-picture: Off", bsOwnerDraw, idPIP)
 	a.pipSizeCombo = create("COMBOBOX", "Preview resolution", cbsDropdownList|cbsOwnerDrawFixed|cbsHasStrings, idPIPSize)
 	a.pipFPSCombo = create("COMBOBOX", "Preview refresh rate", cbsDropdownList|cbsOwnerDrawFixed|cbsHasStrings, idPIPFPS)
+	a.presetDrawerButton = create("BUTTON", "Preset", bsOwnerDraw, idPresetDrawer)
+	a.presetCombo = create("COMBOBOX", "Choose a saved click...", cbsDropdownList|cbsOwnerDrawFixed|cbsHasStrings, idPresetList)
+	a.presetNameEdit = create("EDIT", "", esAutoHScroll, idPresetName)
+	a.presetSaveButton = create("BUTTON", "Save new", bsOwnerDraw, idPresetSave)
+	a.presetLoadButton = create("BUTTON", "Load", bsOwnerDraw, idPresetLoad)
+	a.presetOverwriteButton = create("BUTTON", "Overwrite", bsOwnerDraw, idPresetOverwrite)
+	a.presetDeleteButton = create("BUTTON", "Delete", bsOwnerDraw, idPresetDelete)
+	sendMessage(a.presetNameEdit, emSetLimitText, 80, 0)
 	for _, size := range pipSizes {
 		sendMessage(a.pipSizeCombo, cbAddString, 0, uintptr(unsafe.Pointer(utf16Ptr(size.label))))
 	}
 	for _, fps := range pipFrameRates {
 		sendMessage(a.pipFPSCombo, cbAddString, 0, uintptr(unsafe.Pointer(utf16Ptr(fmt.Sprintf("%d FPS", fps)))))
 	}
-	sendMessage(a.pipSizeCombo, cbSetCurSel, 1, 0)
-	sendMessage(a.pipFPSCombo, cbSetCurSel, 2, 0)
+	sendMessage(a.pipSizeCombo, cbSetCurSel, uintptr(pipSizeIndex(a.settings.PIPWidth, a.settings.PIPHeight)), 0)
+	sendMessage(a.pipFPSCombo, cbSetCurSel, uintptr(pipFPSIndex(a.settings.PIPFPS)), 0)
 	a.updateSettingsHeaders()
 	a.applyFonts()
 	a.layout()
@@ -283,7 +348,11 @@ func (a *application) layout() {
 	procSetScrollInfo.Call(a.hwnd, 1, uintptr(unsafe.Pointer(&info)), 1)
 	getClientRect(a.hwnd, &bounds)
 	w := bounds.right * 96 / a.dpi
-	placements := make([]childPlacement, 0, 12)
+	mainW := w
+	if a.presetDrawerExpanded {
+		mainW = max(28, w-presetDrawerWidth)
+	}
+	placements := make([]childPlacement, 0, 20)
 	place := func(hwnd uintptr, x, y, width, height int32, visible bool) {
 		if hwnd != 0 {
 			placements = append(placements, childPlacement{hwnd: hwnd, x: x, y: y, width: width, height: height, visible: visible})
@@ -299,22 +368,33 @@ func (a *application) layout() {
 
 	// The essentials remain anchored to the window while only the settings
 	// cards move with the vertical scrollbar.
-	place(a.processCombo, 28, targetControlTop, w-106, 300, true)
-	place(a.pickerButton, w-70, targetControlTop, 42, targetControlHeight, true)
+	place(a.processCombo, 28, targetControlTop, mainW-106, 300, true)
+	place(a.pickerButton, mainW-70, targetControlTop, 42, targetControlHeight, true)
 	place(a.clickPointButton, 28, chooseClickTop, 156, 36, true)
-	place(a.toggleButton, 28, 256, w-56, 44, true)
+	place(a.toggleButton, 28, 256, mainW-56, 44, true)
+	place(a.presetDrawerButton, mainW-148, 26, 120, 36, true)
 
 	clickerTop := settingsTop
 	pipTop := clickerTop + clickerSettingsHeight(a.clickerSettingsExpanded) + settingsSectionGap
-	placeSettings(a.clickerSettingsButton, 28, clickerTop, w-56, settingsSectionHeaderHeight, true)
-	placeSettings(a.pipSettingsButton, 28, pipTop, w-56, settingsSectionHeaderHeight, true)
-	placeSettings(a.intervalEdit, w-174, clickerTop+52, 146, 36, a.clickerSettingsExpanded)
-	placeSettings(a.holdButton, w-158, clickerTop+98, 130, 36, a.clickerSettingsExpanded)
-	placeSettings(a.hotkeyButton, w-158, clickerTop+144, 130, 36, a.clickerSettingsExpanded)
-	placeSettings(a.pipButton, w-158, pipTop+52, 130, 36, a.pipSettingsExpanded)
-	columnWidth := (w - 68) / 2
+	placeSettings(a.clickerSettingsButton, 28, clickerTop, mainW-56, settingsSectionHeaderHeight, true)
+	placeSettings(a.pipSettingsButton, 28, pipTop, mainW-56, settingsSectionHeaderHeight, true)
+	intervalEditX, intervalEditWidth, _ := intervalControlLayout(mainW)
+	placeSettings(a.intervalEdit, intervalEditX, clickerTop+52, intervalEditWidth, 36, a.clickerSettingsExpanded)
+	placeSettings(a.holdButton, mainW-158, clickerTop+98, 130, 36, a.clickerSettingsExpanded)
+	placeSettings(a.hotkeyButton, mainW-158, clickerTop+144, 130, 36, a.clickerSettingsExpanded)
+	placeSettings(a.pipButton, mainW-158, pipTop+52, 130, 36, a.pipSettingsExpanded)
+	columnWidth := (mainW - 68) / 2
 	placeSettings(a.pipSizeCombo, 28, pipTop+120, columnWidth, 220, a.pipSettingsExpanded)
 	placeSettings(a.pipFPSCombo, 40+columnWidth, pipTop+120, columnWidth, 220, a.pipSettingsExpanded)
+
+	drawerX := mainW
+	drawerVisible := a.presetDrawerExpanded
+	place(a.presetCombo, drawerX+24, 132, presetDrawerWidth-48, 240, drawerVisible)
+	place(a.presetNameEdit, drawerX+24, 214, presetDrawerWidth-48, 36, drawerVisible)
+	place(a.presetLoadButton, drawerX+24, 268, presetDrawerWidth-48, 36, drawerVisible)
+	place(a.presetSaveButton, drawerX+24, 314, presetDrawerWidth-48, 36, drawerVisible)
+	place(a.presetOverwriteButton, drawerX+24, 360, (presetDrawerWidth-56)/2, 36, drawerVisible)
+	place(a.presetDeleteButton, drawerX+32+(presetDrawerWidth-56)/2, 360, (presetDrawerWidth-56)/2, 36, drawerVisible)
 
 	previousLayout := a.lastLayout
 	previousPlacements := previousLayout.children
@@ -478,6 +558,14 @@ func (a *application) updateControls() {
 		}
 		procEnableWindow.Call(hwnd, enabled)
 	}
+	canPreset := a.hasPersistentSelection() && !running
+	hasPreset := a.selectedPresetIndex() >= 0
+	for _, hwnd := range []uintptr{a.presetCombo, a.presetNameEdit, a.presetSaveButton} {
+		procEnableWindow.Call(hwnd, boolToUintptr(canPreset))
+	}
+	for _, hwnd := range []uintptr{a.presetLoadButton, a.presetOverwriteButton, a.presetDeleteButton} {
+		procEnableWindow.Call(hwnd, boolToUintptr(canPreset && hasPreset))
+	}
 	clickPointEnabled := uintptr(1)
 	if running || a.selected.hwnd == 0 {
 		clickPointEnabled = 0
@@ -508,8 +596,9 @@ func (a *application) updateControls() {
 		action = "Stop clicker"
 	}
 	setWindowText(a.toggleButton, action+" ["+a.hotkey.name()+"]")
+	setWindowText(a.presetDrawerButton, "Preset")
 	a.updateSettingsHeaders()
-	for _, hwnd := range []uintptr{a.pickerButton, a.clickPointButton, a.holdButton, a.hotkeyButton, a.toggleButton, a.clickerSettingsButton, a.pipSettingsButton, a.hwnd} {
+	for _, hwnd := range []uintptr{a.pickerButton, a.clickPointButton, a.holdButton, a.hotkeyButton, a.toggleButton, a.clickerSettingsButton, a.pipSettingsButton, a.presetDrawerButton, a.hwnd} {
 		if hwnd != 0 {
 			procInvalidateRect.Call(hwnd, 0, 1)
 		}
@@ -535,7 +624,554 @@ func parseInterval(text string) (int, error) {
 	return int(value), nil
 }
 
+func pipSizeIndex(width, height int) int {
+	for i, size := range pipSizes {
+		if size.width == width && size.height == height {
+			return i
+		}
+	}
+	return 0
+}
+
+func pipFPSIndex(fps int) int {
+	for i, supported := range pipFrameRates {
+		if supported == fps {
+			return i
+		}
+	}
+	return 2
+}
+
+func (a *application) presetTargetTitle() string {
+	if a.selected.hwnd == 0 {
+		return "Select a target window to manage its saved clicks."
+	}
+	if !a.hasPersistentSelection() {
+		return "This window has no stable identity for presets."
+	}
+	return a.selected.title
+}
+func boolToUintptr(value bool) uintptr {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func (a *application) saveSettings() error {
+	if a.settingsPath == "" {
+		path, err := settingsFilePath()
+		if err != nil {
+			return err
+		}
+		a.settingsPath = path
+	}
+	if a.intervalEdit != 0 && isWindow(a.intervalEdit) {
+		if interval, err := parseInterval(windowText(a.intervalEdit)); err == nil {
+			a.settings.IntervalMS = interval
+		}
+	}
+	a.settings.Hold = a.hold
+	a.settings.Hotkey = savedHotkey{Kind: uint8(a.hotkey.kind), Code: a.hotkey.code}
+	a.settings.PIPWidth, a.settings.PIPHeight, a.settings.PIPFPS =
+		a.pip.options.width, a.pip.options.height, a.pip.options.fps
+
+	if !a.hasPersistentSelection() {
+		a.settings.Selected = nil
+		a.settings = normalizeAppSettings(a.settings)
+		if !a.settingsWritable {
+			return a.settingsUnavailableError()
+		}
+		return saveAppSettings(a.settingsPath, a.settings)
+	}
+
+	identity := a.selected.identity
+	savedIdentity := identity
+	a.settings.Selected = &savedIdentity
+	index := a.ensureSavedWindow(identity)
+	window := &a.settings.Windows[index]
+	if a.selected.hasInputPoint {
+		var bounds rect
+		candidate := savedPoint{X: a.selected.inputPoint.x, Y: a.selected.inputPoint.y}
+		if getClientRect(a.selected.hwnd, &bounds) &&
+			validSavedPoint(candidate, bounds.right-bounds.left, bounds.bottom-bounds.top) {
+			window.CustomPoint = &candidate
+		} else {
+			window.CustomPoint = nil
+			a.selected.hasInputPoint = false
+			a.selected.inputPoint = point{}
+			a.syncSelectedTargetList()
+		}
+	} else {
+		window.CustomPoint = nil
+	}
+	a.settings = normalizeAppSettings(a.settings)
+	if !a.settingsWritable {
+		return a.settingsUnavailableError()
+	}
+	return saveAppSettings(a.settingsPath, a.settings)
+}
+
+func (a *application) settingsUnavailableError() error {
+	if a.settingsLoadError != "" {
+		return fmt.Errorf("existing settings were not changed because loading failed: %s", a.settingsLoadError)
+	}
+	return fmt.Errorf("settings could not be loaded, so changes were not saved")
+}
+
+func (a *application) saveOrReport() {
+	if err := a.saveSettings(); err != nil {
+		a.setStatus("Could not save settings: "+err.Error(), true)
+	}
+}
+
+func (a *application) restoreStartupTarget() {
+	pruned := pruneUnavailableWindows(&a.settings)
+	hadSelection := a.settings.Selected != nil
+	restored := false
+	if a.settings.Selected != nil {
+		savedIdentity := *a.settings.Selected
+		target, ok := matchTargetIdentity(savedIdentity, a.targets)
+		if !ok {
+			if savedIndex, uniqueSaved := a.uniqueSavedWindowClassIndex(savedIdentity); uniqueSaved {
+				if rebound, uniqueTarget := uniqueTargetByExecutableClass(savedIdentity, a.targets); uniqueTarget {
+					target, ok = rebound, true
+					a.settings.Windows[savedIndex].Identity = rebound.identity
+				}
+			}
+		}
+		if ok {
+			if !sameWindowIdentity(savedIdentity, target.identity) {
+				identity := target.identity
+				a.settings.Selected = &identity
+				if savedIndex, uniqueSaved := a.uniqueSavedWindowClassIndex(savedIdentity); uniqueSaved {
+					a.settings.Windows[savedIndex].Identity = target.identity
+				}
+				pruned = true
+			}
+			priorWindow := a.savedWindowIndex(target.identity)
+			hadCustomPoint := priorWindow >= 0 && a.settings.Windows[priorWindow].CustomPoint != nil
+			a.selected = target
+			a.applyStoredCustomPoint()
+			if hadCustomPoint {
+				currentWindow := a.savedWindowIndex(target.identity)
+				if currentWindow < 0 || a.settings.Windows[currentWindow].CustomPoint == nil {
+					pruned = true
+				}
+			}
+			for i := range a.targets {
+				if a.targets[i].hwnd == target.hwnd && a.targets[i].pid == target.pid {
+					a.targets[i] = a.selected
+					sendMessage(a.processCombo, cbSetCurSel, uintptr(i), 0)
+					break
+				}
+			}
+			a.setStatus("Ready. "+a.hotkey.name()+" to start clicking.", false)
+			restored = true
+		} else {
+			a.settings.Selected = nil
+		}
+	}
+	if !restored {
+		a.selected = targetWindow{}
+	}
+	a.refreshPresetControls()
+	if pruned || (hadSelection && !restored) {
+		a.saveOrReport()
+	}
+}
+
+func (a *application) hasPersistentSelection() bool {
+	identity := a.selected.identity
+	return a.selected.hwnd != 0 && identity.ExecutablePath != "" &&
+		identity.WindowClass != "" && identity.Title != ""
+}
+
+func sameWindowIdentity(left, right windowIdentity) bool {
+	return normalizeExecutablePath(left.ExecutablePath) == normalizeExecutablePath(right.ExecutablePath) &&
+		left.WindowClass == right.WindowClass && left.Title == right.Title
+}
+
+func sameExecutableClass(left, right windowIdentity) bool {
+	return normalizeExecutablePath(left.ExecutablePath) != "" &&
+		normalizeExecutablePath(left.ExecutablePath) == normalizeExecutablePath(right.ExecutablePath) &&
+		left.WindowClass != "" && left.WindowClass == right.WindowClass
+}
+
+func uniqueTargetByExecutableClass(identity windowIdentity, targets []targetWindow) (targetWindow, bool) {
+	var match targetWindow
+	count := 0
+	for _, target := range targets {
+		if sameExecutableClass(identity, target.identity) {
+			match = target
+			count++
+		}
+	}
+	return match, count == 1
+}
+
+func (a *application) uniqueSavedWindowClassIndex(identity windowIdentity) (int, bool) {
+	index, count := -1, 0
+	for i := range a.settings.Windows {
+		if sameExecutableClass(identity, a.settings.Windows[i].Identity) {
+			index = i
+			count++
+		}
+	}
+	if count != 1 {
+		return -1, false
+	}
+	return index, true
+}
+
+func (a *application) savedWindowIndex(identity windowIdentity) int {
+	exactIndex, exactCount := -1, 0
+	fallbackIndex, fallbackCount := -1, 0
+	for i := range a.settings.Windows {
+		saved := a.settings.Windows[i].Identity
+		if sameWindowIdentity(saved, identity) {
+			exactIndex, exactCount = i, exactCount+1
+			continue
+		}
+		if normalizeExecutablePath(saved.ExecutablePath) == normalizeExecutablePath(identity.ExecutablePath) &&
+			saved.WindowClass == identity.WindowClass {
+			fallbackIndex, fallbackCount = i, fallbackCount+1
+		}
+	}
+	if exactCount == 1 {
+		return exactIndex
+	}
+	if exactCount > 1 {
+		return -1
+	}
+	if fallbackCount == 1 {
+		return fallbackIndex
+	}
+	return -1
+}
+
+func (a *application) ensureSavedWindow(identity windowIdentity) int {
+	if i := a.savedWindowIndex(identity); i >= 0 {
+		a.settings.Windows[i].Identity = identity
+		return i
+	}
+	a.settings.Windows = append(a.settings.Windows, savedWindow{Identity: identity})
+	return len(a.settings.Windows) - 1
+}
+
+func (a *application) applyStoredCustomPoint() {
+	if !a.hasPersistentSelection() {
+		return
+	}
+	index := a.savedWindowIndex(a.selected.identity)
+	if index < 0 || a.settings.Windows[index].CustomPoint == nil {
+		return
+	}
+	saved := *a.settings.Windows[index].CustomPoint
+	var bounds rect
+	if !getClientRect(a.selected.hwnd, &bounds) ||
+		!validSavedPoint(saved, bounds.right-bounds.left, bounds.bottom-bounds.top) {
+		a.settings.Windows[index].CustomPoint = nil
+		return
+	}
+	a.selected.inputPoint = point{x: saved.X, y: saved.Y}
+	a.selected.hasInputPoint = true
+	a.syncSelectedTargetList()
+}
+
+func (a *application) syncSelectedTargetList() {
+	for i := range a.targets {
+		if a.targets[i].hwnd == a.selected.hwnd && a.targets[i].pid == a.selected.pid {
+			a.targets[i] = a.selected
+			return
+		}
+	}
+}
+
+func (a *application) currentSavedWindowIndex() int {
+	if !a.hasPersistentSelection() {
+		return -1
+	}
+	return a.savedWindowIndex(a.selected.identity)
+}
+
+func (a *application) currentPresets() []savedPreset {
+	index := a.currentSavedWindowIndex()
+	if index < 0 {
+		return nil
+	}
+	return a.settings.Windows[index].Presets
+}
+
+func findSavedPreset(presets []savedPreset, name string) int {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return -1
+	}
+	for i := range presets {
+		if strings.EqualFold(strings.TrimSpace(presets[i].Name), name) {
+			return i
+		}
+	}
+	return -1
+}
+
+func addOrReplaceSavedPreset(presets []savedPreset, preset savedPreset, replace bool) ([]savedPreset, bool) {
+	preset.Name = strings.TrimSpace(preset.Name)
+	if preset.Name == "" {
+		return presets, false
+	}
+	if index := findSavedPreset(presets, preset.Name); index >= 0 {
+		if !replace {
+			return presets, false
+		}
+		presets[index] = preset
+		return presets, true
+	}
+	if replace {
+		return presets, false
+	}
+	return append(presets, preset), true
+}
+
+func deleteSavedPreset(presets []savedPreset, name string) ([]savedPreset, bool) {
+	index := findSavedPreset(presets, name)
+	if index < 0 {
+		return presets, false
+	}
+	copy(presets[index:], presets[index+1:])
+	return presets[:len(presets)-1], true
+}
+
+func (a *application) selectedPresetIndex() int {
+	index := int32(sendMessage(a.presetCombo, cbGetCurSel, 0, 0))
+	presets := a.currentPresets()
+	if index < 0 || int(index) >= len(presets) {
+		return -1
+	}
+	return int(index)
+}
+
+func (a *application) selectedPresetName() string {
+	index := a.selectedPresetIndex()
+	if index < 0 {
+		return ""
+	}
+	return a.currentPresets()[index].Name
+}
+
+func (a *application) refreshPresetControls() {
+	if a.presetCombo == 0 {
+		return
+	}
+	presets := a.currentPresets()
+	sendMessage(a.presetCombo, cbResetContent, 0, 0)
+	selected := -1
+	for i, preset := range presets {
+		sendMessage(a.presetCombo, cbAddString, 0, uintptr(unsafe.Pointer(utf16Ptr(preset.Name))))
+		if strings.EqualFold(preset.Name, a.presetSelectedName) {
+			selected = i
+		}
+	}
+	if selected >= 0 {
+		sendMessage(a.presetCombo, cbSetCurSel, uintptr(selected), 0)
+	} else {
+		a.presetSelectedName = ""
+		sendMessage(a.presetCombo, cbSetCurSel, ^uintptr(0), 0)
+	}
+	procInvalidateRect.Call(a.presetCombo, 0, 1)
+}
+
+func (a *application) currentClickPoint() (savedPoint, bool) {
+	if a.selected.hwnd == 0 {
+		return savedPoint{}, false
+	}
+	clickPoint, _, ok := targetClickPoint(a.selected)
+	if !ok {
+		return savedPoint{}, false
+	}
+	var bounds rect
+	if !getClientRect(a.selected.hwnd, &bounds) {
+		return savedPoint{}, false
+	}
+	saved := savedPoint{X: clickPoint.x, Y: clickPoint.y}
+	return saved, validSavedPoint(saved, bounds.right-bounds.left, bounds.bottom-bounds.top)
+}
+
+func (a *application) saveNewPreset() {
+	name := strings.TrimSpace(windowText(a.presetNameEdit))
+	if name == "" {
+		a.setStatus("Enter a name for this click preset.", true)
+		procSetFocus.Call(a.presetNameEdit)
+		return
+	}
+	point, ok := a.currentClickPoint()
+	if !ok {
+		a.setStatus("The selected application is unavailable.", true)
+		return
+	}
+	index := a.ensureSavedWindow(a.selected.identity)
+	presets, added := addOrReplaceSavedPreset(a.settings.Windows[index].Presets, savedPreset{Name: name, Point: point}, false)
+	if !added {
+		a.setStatus("A preset with that name already exists. Choose it and overwrite it.", true)
+		return
+	}
+	a.settings.Windows[index].Presets = presets
+	a.presetSelectedName = name
+	a.refreshPresetControls()
+	if err := a.saveSettings(); err != nil {
+		a.setStatus("Could not save settings: "+err.Error(), true)
+		return
+	}
+	a.setStatus("Saved click preset “"+name+"”.", false)
+	a.updateControls()
+}
+
+func (a *application) loadSelectedPreset() {
+	presets := a.currentPresets()
+	index := a.selectedPresetIndex()
+	if index < 0 || index >= len(presets) {
+		a.setStatus("Choose a saved click preset first.", true)
+		return
+	}
+	saved := presets[index]
+	var bounds rect
+	if !getClientRect(a.selected.hwnd, &bounds) ||
+		!validSavedPoint(saved.Point, bounds.right-bounds.left, bounds.bottom-bounds.top) {
+		a.setStatus("That preset point is outside the current application area.", true)
+		return
+	}
+	a.selected.inputPoint = point{x: saved.Point.X, y: saved.Point.Y}
+	a.selected.hasInputPoint = true
+	a.syncSelectedTargetList()
+	a.presetSelectedName = saved.Name
+	if err := a.saveSettings(); err != nil {
+		a.setStatus("Could not save settings: "+err.Error(), true)
+		return
+	}
+	a.setStatus("Loaded click preset “"+saved.Name+"”.", false)
+	a.updateControls()
+}
+
+func (a *application) overwriteSelectedPreset() {
+	presets := a.currentPresets()
+	index := a.selectedPresetIndex()
+	if index < 0 || index >= len(presets) {
+		a.setStatus("Choose a saved click preset to overwrite.", true)
+		return
+	}
+	point, ok := a.currentClickPoint()
+	if !ok {
+		a.setStatus("The selected application is unavailable.", true)
+		return
+	}
+	name := presets[index].Name
+	windowIndex := a.currentSavedWindowIndex()
+	updated, replaced := addOrReplaceSavedPreset(presets, savedPreset{Name: name, Point: point}, true)
+	if !replaced {
+		a.setStatus("Could not update that preset.", true)
+		return
+	}
+	a.settings.Windows[windowIndex].Presets = updated
+	a.presetSelectedName = name
+	if err := a.saveSettings(); err != nil {
+		a.setStatus("Could not save settings: "+err.Error(), true)
+		return
+	}
+	a.setStatus("Updated click preset “"+name+"”.", false)
+	a.updateControls()
+}
+
+func (a *application) deleteSelectedPreset() {
+	presets := a.currentPresets()
+	index := a.selectedPresetIndex()
+	if index < 0 || index >= len(presets) {
+		a.setStatus("Choose a saved click preset to delete.", true)
+		return
+	}
+	name := presets[index].Name
+	windowIndex := a.currentSavedWindowIndex()
+	updated, deleted := deleteSavedPreset(presets, name)
+	if !deleted {
+		a.setStatus("Could not delete that preset.", true)
+		return
+	}
+	a.settings.Windows[windowIndex].Presets = updated
+	a.presetSelectedName = ""
+	a.refreshPresetControls()
+	if err := a.saveSettings(); err != nil {
+		a.setStatus("Could not save settings: "+err.Error(), true)
+		return
+	}
+	a.setStatus("Deleted click preset “"+name+"”.", false)
+	a.updateControls()
+}
+
+func workAreaForWindow(hwnd uintptr) (rect, bool) {
+	monitor, _, _ := procMonitorFromWindow.Call(hwnd, monitorDefaultToNearest)
+	if monitor == 0 {
+		return rect{}, false
+	}
+	info := monitorInfo{cbSize: uint32(unsafe.Sizeof(monitorInfo{}))}
+	ok, _, _ := procGetMonitorInfo.Call(monitor, uintptr(unsafe.Pointer(&info)))
+	if ok == 0 || info.work.right <= info.work.left || info.work.bottom <= info.work.top {
+		return rect{}, false
+	}
+	return info.work, true
+}
+
+func clampWindowRectToWorkArea(bounds, work rect) rect {
+	workWidth := work.right - work.left
+	workHeight := work.bottom - work.top
+	width := min(bounds.right-bounds.left, workWidth)
+	height := min(bounds.bottom-bounds.top, workHeight)
+	left, top := bounds.left, bounds.top
+	if left < work.left {
+		left = work.left
+	}
+	if left+width > work.right {
+		left = work.right - width
+	}
+	if top < work.top {
+		top = work.top
+	}
+	if top+height > work.bottom {
+		top = work.bottom - height
+	}
+	return rect{left: left, top: top, right: left + width, bottom: top + height}
+}
+func (a *application) togglePresetDrawer() {
+	a.closePresetPreviewDropdown()
+	wasExpanded := a.presetDrawerExpanded
+	a.presetDrawerExpanded = !wasExpanded
+	if a.hwnd != 0 && isWindow(a.hwnd) {
+		var bounds rect
+		result, _, _ := procGetWindowRect.Call(a.hwnd, uintptr(unsafe.Pointer(&bounds)))
+		if result != 0 {
+			delta := a.s(presetDrawerWidth)
+			if a.presetDrawerExpanded {
+				bounds.right += delta
+			} else {
+				bounds.right = max(bounds.left+a.s(536), bounds.right-delta)
+			}
+			if work, ok := workAreaForWindow(a.hwnd); ok {
+				bounds = clampWindowRectToWorkArea(bounds, work)
+			}
+			width, height := bounds.right-bounds.left, bounds.bottom-bounds.top
+			if resized, _, _ := procSetWindowPos.Call(a.hwnd, 0,
+				uintptr(bounds.left), uintptr(bounds.top), uintptr(width), uintptr(height),
+				swpNoZOrder|swpNoActivate); resized == 0 {
+				a.presetDrawerExpanded = wasExpanded
+			}
+		} else {
+			a.presetDrawerExpanded = wasExpanded
+		}
+	}
+	a.layout()
+	a.updateControls()
+}
 func (a *application) toggle() {
+	a.closePresetPreviewDropdown()
 	a.capture = false
 	if a.picker || a.pickerHighlighted != 0 {
 		a.clearPickerPreview()
@@ -586,8 +1222,12 @@ func (a *application) handleCommand(id, notification uint16) {
 	case idProcess:
 		if notification == cbnDropdown {
 			a.refreshTargets()
+			a.refreshPresetControls()
+			a.saveOrReport()
 		}
 		if notification == cbnSelChange {
+			a.closePresetPreviewDropdown()
+			a.hideClickPointPreview()
 			index := int32(sendMessage(a.processCombo, cbGetCurSel, 0, 0))
 			if index >= 0 && int(index) < len(a.targets) {
 				if a.pointPicker {
@@ -598,9 +1238,12 @@ func (a *application) handleCommand(id, notification uint16) {
 				}
 				a.picker = false
 				a.selected = a.targets[index]
+				a.applyStoredCustomPoint()
 				a.setStatus("Ready. "+a.hotkey.name()+" to start clicking.", false)
 				a.restartPIP()
+				a.refreshPresetControls()
 				a.updateControls()
+				a.saveOrReport()
 			}
 		}
 	case idPicker:
@@ -615,6 +1258,7 @@ func (a *application) handleCommand(id, notification uint16) {
 		if notification == bnClicked && !a.clicker.running {
 			a.hold = !a.hold
 			a.updateControls()
+			a.saveOrReport()
 		}
 	case idHotkey:
 		if notification == bnClicked && !a.clicker.running {
@@ -653,6 +1297,9 @@ func (a *application) handleCommand(id, notification uint16) {
 		if notification == enChange {
 			a.updateSettingsHeaders()
 			procInvalidateRect.Call(a.clickerSettingsButton, 0, 1)
+			if _, err := parseInterval(windowText(a.intervalEdit)); err == nil {
+				a.saveOrReport()
+			}
 		}
 	case idPIP:
 		if notification == bnClicked {
@@ -669,6 +1316,44 @@ func (a *application) handleCommand(id, notification uint16) {
 			a.changePIPOptions()
 			a.updateSettingsHeaders()
 			procInvalidateRect.Call(a.pipSettingsButton, 0, 1)
+			a.saveOrReport()
+		}
+	case idPresetDrawer:
+		if notification == bnClicked {
+			a.togglePresetDrawer()
+		}
+	case idPresetList:
+		switch notification {
+		case cbnDropdown:
+			a.openPresetPreviewDropdown()
+		case cbnSelEndOK:
+			a.presetDropdownCommit = true
+		case cbnSelEndCancel:
+			a.presetDropdownCommit = false
+		case cbnCloseUp:
+			a.closePresetPreviewDropdown()
+			a.updateControls()
+		case cbnSelChange:
+			if !a.presetDropdownOpen {
+				a.presetSelectedName = a.selectedPresetName()
+				a.updateControls()
+			}
+		}
+	case idPresetSave:
+		if notification == bnClicked {
+			a.saveNewPreset()
+		}
+	case idPresetLoad:
+		if notification == bnClicked {
+			a.loadSelectedPreset()
+		}
+	case idPresetOverwrite:
+		if notification == bnClicked {
+			a.overwriteSelectedPreset()
+		}
+	case idPresetDelete:
+		if notification == bnClicked {
+			a.deleteSelectedPreset()
 		}
 	}
 }
@@ -692,6 +1377,7 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 		a.createControls(hwnd)
 		return 0
 	case wmSize:
+		a.closePresetPreviewDropdown()
 		a.hideClickPointPreview()
 		if wparam == 1 && a.tray.registered {
 			procShowWindow.Call(hwnd, swHide)
@@ -705,10 +1391,15 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 	case wmActivate:
 		if loword(wparam) == 0 {
 			a.hideClickPointPreview()
+			a.closePresetPreviewDropdown()
 		}
 	case wmGetMinMaxInfo:
 		info := (*minMaxInfo)(unsafe.Pointer(lparam))
-		info.minTrackSize = point{a.s(536), a.s(450)}
+		minWidth := int32(536)
+		if a.presetDrawerExpanded {
+			minWidth += presetDrawerWidth
+		}
+		info.minTrackSize = point{a.s(minWidth), a.s(450)}
 		return 0
 	case 0x0115: // WM_VSCROLL
 		a.handleScroll(loword(wparam))
@@ -739,15 +1430,21 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 			a.hotkey, a.capture = next, false
 			a.setStatus("Hotkey set to "+next.name()+".", false)
 			a.updateControls()
+			a.saveOrReport()
 		} else if next == a.hotkey {
 			a.toggle()
 		}
 		return 0
 	case wmAppPickTarget:
 		a.selectPickedTarget(wparam, unpackPoint(lparam))
+		a.applyStoredCustomPoint()
+		a.refreshPresetControls()
+		a.saveOrReport()
 		return 0
 	case wmAppPickPoint:
-		a.selectPickedClickPoint(wparam, unpackPoint(lparam))
+		if a.selectPickedClickPoint(wparam, unpackPoint(lparam)) {
+			a.saveOrReport()
+		}
 		return 0
 	case wmAppPickReleased:
 		a.updateControls()
@@ -804,6 +1501,7 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 		a.layout()
 		return 0
 	case wmQueryEndSession:
+		a.saveOrReport()
 		a.stopPIP()
 		_ = a.clicker.stop()
 		a.updateControls()
@@ -821,6 +1519,8 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 			a.updateControls()
 		}
 	case wmClose:
+		a.closePresetPreviewDropdown()
+		a.hideClickPointPreview()
 		if err := a.clicker.stop(); err != nil {
 			a.showWindow()
 			a.setStatus("Release failed. Press Stop to retry before closing.", true)
@@ -828,9 +1528,11 @@ func mainWindowProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 			return 0
 		}
 		a.uninstallHooks()
+		a.saveOrReport()
 		procDestroyWindow.Call(hwnd)
 		return 0
 	case wmDestroy:
+		a.saveOrReport()
 		a.stopPIP()
 		_ = a.clicker.stop()
 		a.tray.remove()

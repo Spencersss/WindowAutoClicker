@@ -33,14 +33,14 @@ func (a *application) makeFonts() {
 }
 
 func (a *application) applyFonts() {
-	for _, hwnd := range []uintptr{a.processCombo, a.pickerButton, a.clickPointButton, a.intervalEdit, a.holdButton, a.hotkeyButton, a.toggleButton, a.clickerSettingsButton, a.pipSettingsButton, a.pipButton, a.pipSizeCombo, a.pipFPSCombo} {
+	for _, hwnd := range []uintptr{a.processCombo, a.pickerButton, a.clickPointButton, a.intervalEdit, a.holdButton, a.hotkeyButton, a.toggleButton, a.clickerSettingsButton, a.pipSettingsButton, a.pipButton, a.pipSizeCombo, a.pipFPSCombo, a.presetDrawerButton, a.presetCombo, a.presetNameEdit, a.presetSaveButton, a.presetLoadButton, a.presetOverwriteButton, a.presetDeleteButton} {
 		if hwnd != 0 {
 			sendMessage(hwnd, wmSetFont, a.font, 1)
 		}
 	}
 	sendMessage(a.processCombo, cbSetItemHeight, ^uintptr(0), uintptr(a.s(34)))
 	sendMessage(a.processCombo, cbSetItemHeight, 0, uintptr(a.s(targetComboItemHeight)))
-	for _, hwnd := range []uintptr{a.pipSizeCombo, a.pipFPSCombo} {
+	for _, hwnd := range []uintptr{a.pipSizeCombo, a.pipFPSCombo, a.presetCombo} {
 		if hwnd != 0 {
 			sendMessage(hwnd, cbSetItemHeight, ^uintptr(0), uintptr(a.s(32)))
 			sendMessage(hwnd, cbSetItemHeight, 0, uintptr(a.s(28)))
@@ -96,17 +96,23 @@ func (a *application) paintMain(hwnd uintptr) {
 	getClientRect(hwnd, &bounds)
 	procFillRect.Call(hdc, uintptr(unsafe.Pointer(&bounds)), a.bgBrush)
 	w := bounds.right * 96 / a.dpi
+	mainW := w
+	if a.presetDrawerExpanded {
+		mainW = max(536, w-presetDrawerWidth)
+		fill(hdc, a.box(mainW, 0, presetDrawerWidth, bounds.bottom*96/a.dpi), colorField)
+		fill(hdc, a.box(mainW, 0, 1, bounds.bottom*96/a.dpi), colorBorder)
+	}
 	label := func(text string, x, y, width, height int32, font, color uintptr) {
 		a.text(hdc, text, a.box(x, y, width, height), font, color, dtLeft)
 	}
 
 	// Fixed essentials: target, click point, start/stop, and status.
-	label("spencer / clicker", 28, 24, w-56, 36, a.titleFont, colorText)
-	label("A little less clicking.", 28, 64, w-56, 22, a.smallFont, colorMuted)
-	fill(hdc, a.box(28, 98, w-56, 1), colorBorder)
-	label("TARGET WINDOW", 28, 110, w-56, 20, a.smallFont, colorMuted)
-	label("Client area: "+a.clickPointDescription(), 200, 189, w-228, 36, a.smallFont, colorMuted)
-	fill(hdc, a.box(28, 237, w-56, 1), colorBorder)
+	label("spencer / clicker", 28, 24, mainW-192, 36, a.titleFont, colorText)
+	label("A little less clicking.", 28, 64, mainW-56, 22, a.smallFont, colorMuted)
+	fill(hdc, a.box(28, 98, mainW-56, 1), colorBorder)
+	label("TARGET WINDOW", 28, 110, mainW-56, 20, a.smallFont, colorMuted)
+	label("Client area: "+a.clickPointDescription(), 200, 189, mainW-228, 36, a.smallFont, colorMuted)
+	fill(hdc, a.box(28, 237, mainW-56, 1), colorBorder)
 	statusColor := colorMuted
 	if a.statusError {
 		statusColor = colorRed
@@ -114,25 +120,44 @@ func (a *application) paintMain(hwnd uintptr) {
 		statusColor = colorGreen
 	}
 	circle(hdc, a.box(29, 312, 8, 8), statusColor, statusColor)
-	label(a.status, 44, 303, w-72, 24, a.smallFont, statusColor)
-	fill(hdc, a.box(28, 335, w-56, 1), colorBorder)
-	label("SETTINGS", 28, 340, w-56, 18, a.smallFont, colorMuted)
+	label(a.status, 44, 303, mainW-72, 24, a.smallFont, statusColor)
+	fill(hdc, a.box(28, 335, mainW-56, 1), colorBorder)
+	label("SETTINGS", 28, 340, mainW-190, 18, a.smallFont, colorMuted)
+	if a.presetDrawerExpanded {
+		label("SAVED CLICKS", mainW+24, 24, presetDrawerWidth-48, 28, a.titleFont, colorText)
+		label(a.presetTargetTitle(), mainW+24, 62, presetDrawerWidth-48, 38, a.smallFont, colorMuted)
+		fill(hdc, a.box(mainW+24, 108, presetDrawerWidth-48, 1), colorBorder)
+		label("PRESETS FOR THIS WINDOW", mainW+24, 112, presetDrawerWidth-48, 18, a.smallFont, colorMuted)
+		label("PRESET NAME", mainW+24, 190, presetDrawerWidth-48, 18, a.smallFont, colorMuted)
+		pointText := "Select an application to see its saved clicks."
+		if saved, ok := a.currentClickPoint(); ok {
+			kind := "Custom"
+			if !a.selected.hasInputPoint {
+				kind = "Center"
+			}
+			pointText = fmt.Sprintf("%s point  x=%d, y=%d", kind, saved.X, saved.Y)
+		}
+		label("CURRENT CLICK", mainW+24, 412, presetDrawerWidth-48, 18, a.smallFont, colorMuted)
+		label(pointText, mainW+24, 434, presetDrawerWidth-48, 38, a.smallFont, colorText)
+	}
 
 	// Clip scrolling captions to the settings viewport so they never paint
 	// over the fixed controls, even while a section header scrolls past.
 	saveDC, _, _ := procSaveDC.Call(hdc)
-	clip := a.box(0, settingsTop, w, bounds.bottom*96/a.dpi)
+	clip := a.box(0, settingsTop, mainW, bounds.bottom*96/a.dpi)
 	procIntersectClipRect.Call(hdc, uintptr(clip.left), uintptr(clip.top), uintptr(clip.right), uintptr(clip.bottom))
 	clickerTop := settingsTop - a.scroll
 	pipTop := settingsTop + clickerSettingsHeight(a.clickerSettingsExpanded) + settingsSectionGap - a.scroll
 	if a.clickerSettingsExpanded {
-		label("Click interval", 28, clickerTop+52, w-205, 36, a.font, colorText)
-		label("Hold left click", 28, clickerTop+98, w-205, 36, a.font, colorText)
-		label("Toggle hotkey", 28, clickerTop+144, w-205, 36, a.font, colorText)
+		intervalEditX, _, intervalUnitX := intervalControlLayout(mainW)
+		label("Click interval", 28, clickerTop+52, max(0, intervalEditX-28), 36, a.font, colorText)
+		a.text(hdc, "ms", a.box(intervalUnitX, clickerTop+52, clickerIntervalUnitWidth, 36), a.smallFont, colorMuted, dtLeft|dtVCenter|dtSingleLine)
+		label("Hold left click", 28, clickerTop+98, mainW-205, 36, a.font, colorText)
+		label("Toggle hotkey", 28, clickerTop+144, mainW-205, 36, a.font, colorText)
 	}
 	if a.pipSettingsExpanded {
-		label("Live preview", 28, pipTop+52, w-205, 36, a.font, colorText)
-		columnWidth := (w - 68) / 2
+		label("Live preview", 28, pipTop+52, mainW-205, 36, a.font, colorText)
+		columnWidth := (mainW - 68) / 2
 		label("MAX. PREVIEW SIZE", 28, pipTop+98, columnWidth, 18, a.smallFont, colorMuted)
 		label("REFRESH RATE", 40+columnWidth, pipTop+98, columnWidth, 18, a.smallFont, colorMuted)
 	}
@@ -186,8 +211,42 @@ func drawWindowSelector(hdc uintptr, bounds rect, color uintptr) {
 	procDeleteObject.Call(hole)
 }
 
+func drawPresetBook(hdc uintptr, bounds rect, color uintptr) {
+	size := min(bounds.right-bounds.left, bounds.bottom-bounds.top)
+	if size <= 0 {
+		return
+	}
+	const view = int32(32)
+	left := bounds.left + ((bounds.right-bounds.left)-size)/2
+	top := bounds.top + ((bounds.bottom-bounds.top)-size)/2
+	x := func(v int32) int32 { return left + v*size/view }
+	y := func(v int32) int32 { return top + v*size/view }
+	pen, _, _ := procCreatePen.Call(0, uintptr(max(1, size/16)), color)
+	oldPen, _, _ := procSelectObject.Call(hdc, pen)
+	polyline := func(points ...point) {
+		if len(points) < 2 {
+			return
+		}
+		procMoveToEx.Call(hdc, uintptr(x(points[0].x)), uintptr(y(points[0].y)), 0)
+		for _, p := range points[1:] {
+			procLineTo.Call(hdc, uintptr(x(p.x)), uintptr(y(p.y)))
+		}
+	}
+	middle := view / 2
+	polyline(point{4, 5}, point{middle - 1, 7}, point{middle - 1, 27}, point{4, 25}, point{4, 5})
+	polyline(point{middle + 1, 7}, point{view - 4, 5}, point{view - 4, 25}, point{middle + 1, 27}, point{middle + 1, 7})
+	polyline(point{middle, 6}, point{middle, 27})
+	polyline(point{7, 11}, point{middle - 3, 12})
+	polyline(point{7, 16}, point{middle - 3, 17})
+	polyline(point{middle + 3, 12}, point{view - 7, 11})
+	polyline(point{middle + 3, 17}, point{view - 7, 16})
+	procSelectObject.Call(hdc, oldPen)
+	procDeleteObject.Call(pen)
+}
 func shouldDrawOwnerFocusCue(itemState uint32) bool {
-	return itemState&odsFocus != 0 && itemState&odsNoFocusRect == 0
+	// Native focus rectangles read as a persistent white box in this dark UI.
+	// Keep keyboard focus behavior but don't add a second visual border.
+	return false
 }
 
 func (a *application) drawItem(item *drawItemStruct) {
@@ -195,7 +254,7 @@ func (a *application) drawItem(item *drawItemStruct) {
 		fill(item.hdc, item.rcItem, colorBG)
 		background, border := colorField, colorBorder
 		if item.itemState&odsSelected != 0 {
-			border = colorText
+			border = colorGreen
 		}
 		roundBox(item.hdc, item.rcItem, background, border, a.s(8))
 		mainText, summary, expanded := "Clicker settings", a.clickerSettingsSummary(), a.clickerSettingsExpanded
@@ -223,13 +282,17 @@ func (a *application) drawItem(item *drawItemStruct) {
 		}
 		return
 	}
-	if item.ctlID == idPIPSize || item.ctlID == idPIPFPS {
+	if item.ctlID == idPIPSize || item.ctlID == idPIPFPS || item.ctlID == idPresetList {
 		text := ""
 		index := int(item.itemID)
 		if item.ctlID == idPIPSize && index >= 0 && index < len(pipSizes) {
 			text = pipSizes[index].label
 		} else if item.ctlID == idPIPFPS && index >= 0 && index < len(pipFrameRates) {
 			text = fmt.Sprintf("%d FPS", pipFrameRates[index])
+		} else if item.ctlID == idPresetList && index >= 0 && index < len(a.currentPresets()) {
+			text = a.currentPresets()[index].Name
+		} else if item.ctlID == idPresetList {
+			text = "Choose a saved click..."
 		}
 		background := colorField
 		if item.itemState&odsSelected != 0 {
@@ -238,7 +301,11 @@ func (a *application) drawItem(item *drawItemStruct) {
 		fill(item.hdc, item.rcItem, background)
 		box := item.rcItem
 		box.left += a.s(8)
-		a.text(item.hdc, text, box, a.font, colorText, dtLeft)
+		foreground := uintptr(colorText)
+		if item.ctlID == idPresetList && (item.itemID == 0xffffffff || int(item.itemID) >= len(a.currentPresets())) {
+			foreground = colorMuted
+		}
+		a.text(item.hdc, text, box, a.font, foreground, dtLeft)
 		return
 	}
 	if item.ctlID == idPicker {
@@ -250,7 +317,7 @@ func (a *application) drawItem(item *drawItemStruct) {
 			foreground = colorMuted
 		}
 		if item.itemState&odsSelected != 0 {
-			border = colorText
+			border = colorGreen
 		}
 		fill(item.hdc, item.rcItem, colorBG)
 		roundBox(item.hdc, item.rcItem, background, border, a.s(8))
@@ -304,6 +371,19 @@ func (a *application) drawItem(item *drawItemStruct) {
 		if a.pointPicker {
 			text, background, foreground = "CLICK A SPOT", rgb(32, 66, 49), colorGreen
 		}
+	case idPresetDrawer:
+		text = "PRESET"
+		if a.presetDrawerExpanded {
+			background, foreground, border = rgb(32, 66, 49), colorGreen, colorGreen
+		}
+	case idPresetSave:
+		text = "SAVE NEW"
+	case idPresetLoad:
+		text = "LOAD SELECTED"
+	case idPresetOverwrite:
+		text = "OVERWRITE"
+	case idPresetDelete:
+		text = "DELETE"
 	case idPIP:
 		text = "OFF"
 		if a.pip.enabled {
@@ -329,14 +409,24 @@ func (a *application) drawItem(item *drawItemStruct) {
 		foreground = colorMuted
 	}
 	if item.itemState&odsSelected != 0 {
-		border = colorText
+		border = colorGreen
 	}
 	fill(item.hdc, item.rcItem, colorBG)
 	roundBox(item.hdc, item.rcItem, background, border, a.s(8))
 	box := item.rcItem
 	box.left += a.s(8)
 	box.right -= a.s(8)
-	a.text(item.hdc, text, box, a.font, foreground, dtCenter)
+	if item.ctlID == idPresetDrawer {
+		iconBox := item.rcItem
+		iconBox.left += a.s(14)
+		iconBox.right = iconBox.left + a.s(20)
+		drawPresetBook(item.hdc, iconBox, foreground)
+		box.left = iconBox.right + a.s(10)
+		box.right -= a.s(8)
+		a.text(item.hdc, text, box, a.font, foreground, dtLeft)
+	} else {
+		a.text(item.hdc, text, box, a.font, foreground, dtCenter)
+	}
 	if shouldDrawOwnerFocusCue(item.itemState) {
 		box.top += a.s(4)
 		box.bottom -= a.s(4)
